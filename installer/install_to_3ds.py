@@ -93,6 +93,16 @@ poll();
 </script></body></html>"""
 
 
+class OwnPortServer(http.server.ThreadingHTTPServer):
+    """Refuses a port another program already has (Python's default lets Windows share it silently)."""
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def make_handler(path, name, url):
     size = os.path.getsize(path)
     page = (PAGE.replace('__NAME__', os.path.splitext(name)[0]).replace('__URL__', url)
@@ -199,7 +209,7 @@ def remote_install(url, fixed_ip):
             try:
                 sock.recv(1)                                        # FBI replies (or hangs up) when it's finished,
                 if S['state'] == 'downloading' and S['sent'] >= S['size']:      # also when B cancelled it, so
-                    open(REMEMBER, 'w').write(ip); finish(True, ip); break      # only a full download counts
+                    remember(ip); finish(True, ip); break                       # only a full download counts
                 sock.close(); sock = None; break                    # cancelled on the 3DS: keep waiting
             except socket.timeout:
                 if S['state'] == 'found' and time.time() - t_found > 120:
@@ -213,6 +223,12 @@ def remote_install(url, fixed_ip):
             set_state(state='waiting', sent=0, method=None, ip=None)
             print('\nThe device at %s didn\'t install it (cancelled, or not FBI). Still waiting...' % ip)
             time.sleep(3)
+
+
+def remember(ip):
+    if not ip.startswith('127.'):                                   # never this PC itself (a test stand-in)
+        try: open(REMEMBER, 'w').write(ip)
+        except OSError: pass
 
 
 # ------------------------------------------------------------------ the page window
@@ -239,12 +255,32 @@ def open_page(url):
     return None, None
 
 
+def close_page(proc, prof):
+    """Edge can hand its window to a second copy of itself, so stopping proc alone may leave the page open:
+    also stop every browser process using this page's own private profile folder."""
+    if not proc: return
+    proc.terminate()
+    try: proc.wait(5)
+    except subprocess.TimeoutExpired: proc.kill()
+    if os.name == 'nt':
+        tag = os.path.basename(prof)
+        ps = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' or Name='chrome.exe'\" | "
+              "Where-Object { $_.CommandLine -like '*%s*' } | "
+              "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" % tag)
+        try: subprocess.run(['powershell', '-NoProfile', '-Command', ps], timeout=20, creationflags=0x08000000,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired): pass
+    time.sleep(0.5)
+    shutil.rmtree(prof, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description='Install a .cia on your 3DS with FBI over Wi-Fi.')
     ap.add_argument('cia', nargs='?', help='the .cia to install (default: N3VPlayer.cia next to this script)')
     ap.add_argument('--ip', help="the 3DS's address, if it can't be found by itself (FBI shows it)")
     ap.add_argument('--port', type=int, default=8642)
     ap.add_argument('--no-browser', action='store_true', help="don't open the page")
+    ap.add_argument('--stop-file', help='stop (and close the page) when this file appears; used by the converter')
     a = ap.parse_args()
     path = a.cia
     if not path:
@@ -259,7 +295,7 @@ def main():
     server = None
     for port in [a.port] + list(range(a.port + 1, a.port + 20)):
         try:
-            server = http.server.ThreadingHTTPServer(('0.0.0.0', port), make_handler(path, name, 'http://%s:%d/%s' % (lan, port, name)))
+            server = OwnPortServer(('0.0.0.0', port), make_handler(path, name, 'http://%s:%d/%s' % (lan, port, name)))
             break
         except OSError:
             continue
@@ -278,6 +314,7 @@ def main():
     last = -1
     try:
         while not DONE.wait(0.5):
+            if a.stop_file and os.path.exists(a.stop_file): raise KeyboardInterrupt
             if S['state'] == 'downloading':
                 pct = S['sent'] * 100 // max(1, size)
                 if pct != last:
@@ -285,7 +322,7 @@ def main():
                     print('\r  sending to the 3DS (%s): %3d%%  (%.1f of %.1f MB)' % (S['method'], pct, S['sent'] / 1048576, size / 1048576), end='', flush=True)
     except KeyboardInterrupt:
         print('\nStopped. Nothing was installed.' if S['state'] != 'done' else '')
-        if proc: proc.terminate()
+        close_page(proc, prof)
         return 1
     print()
     if S['state'] == 'done':
@@ -294,11 +331,7 @@ def main():
     else:
         print('Failed: %s' % S['msg'])
     time.sleep(2.5)                                                 # let the page show the result, then close it
-    if proc:
-        proc.terminate()
-        try: proc.wait(5)
-        except subprocess.TimeoutExpired: proc.kill()
-        shutil.rmtree(prof, ignore_errors=True)
+    close_page(proc, prof)
     server.shutdown()
     return 0 if S['state'] == 'done' else 1
 

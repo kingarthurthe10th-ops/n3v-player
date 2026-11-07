@@ -38,21 +38,29 @@ Copy the `.n3v` files anywhere on the SD card. The player starts in `sdmc:/video
 
 ## Controls
 
-| Browser | |
+The bottom screen has big buttons. **Left/Right** move the blue highlight between them and **A** presses it, or just tap them.
+
+| File list | |
 |---|---|
-| D-pad up/down | move |
-| D-pad left/right | page |
-| A | open folder / play |
+| D-pad up/down | move through the list |
+| D-pad left/right | highlight **Play / Open**, **Back** or **From PC** |
+| A | press the highlighted button |
+| Tap the preview | play |
 | B | up a folder |
 | START | quit |
 
 | Playing | |
 |---|---|
-| A | pause |
-| L / R | back / ahead 10 s |
+| D-pad left/right | highlight **Stop**, **-10 s**, **Pause** or **+10 s** |
+| A | press the highlighted button |
+| Tap or drag the progress bar | jump there |
 | D-pad up/down | ahead / back 1 min |
+| L / R | back / ahead 10 s |
 | B | stop, back to the list |
-| START | quit |
+
+## Send videos over Wi-Fi
+
+After converting, the converter asks **No / Yes, send it / I don't have N3V Player on my 3DS**. "Yes" opens a window showing your PC's address; on the 3DS choose **From PC**, type that address and the videos download into `sdmc:/videos/`. The last choice walks you through installing N3V Player first. You can also send any `.n3v` later with **Send to 3DS...**.
 
 ## Build
 

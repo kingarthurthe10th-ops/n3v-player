@@ -10,6 +10,9 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <math.h>
+#include "net.h"
+#include "ui.h"
 
 #define W 400
 #define H 240
@@ -20,10 +23,10 @@
 #define ABLK_SAMP (ABLK_FR * 64)
 #define AQ 96                      // audio blocks kept read ahead (~6 s)
 #define NWB 8
+#define DEST_DIR "sdmc:/videos/"
 
 typedef struct { char magic[4]; u32 fpsNum, fpsDen, frames, rate, audioOff, audioBytes, keyInt, keyCount, keyOff; } Hdr;
 
-static PrintConsole topCon, botCon;
 static u16 pic[W * H];             // the picture, in framebuffer order (column by column, bottom to top)
 static u8 dbuf[1 + 750 + NBLK * 8];
 
@@ -165,22 +168,49 @@ static void audioReset(void) {
 }
 
 // ---------- player ----------
-static void fmtTime(char *s, u32 sec) { sprintf(s, "%lu:%02lu:%02lu", sec / 3600, sec / 60 % 60, sec % 60); }
+static void fmtTime(char *s, u32 sec) {
+	if (sec >= 3600) sprintf(s, "%lu:%02lu:%02lu", sec / 3600, sec / 60 % 60, sec % 60);
+	else sprintf(s, "%lu:%02lu", sec / 60, sec % 60);
+}
 
-static void present(void) {
+static void fmtSize(char *s, u64 b) {
+	if (b >= 1024ull * 1024 * 1024) sprintf(s, "%.1f GB", b / 1073741824.0);
+	else sprintf(s, "%.1f MB", b / 1048576.0);
+}
+
+// The top screen shows the video by CPU (RGB565, swapped by hand); otherwise citro2d draws it (BGR8).
+static void videoMode(bool on) { gfxSetScreenFormat(GFX_TOP, on ? GSP_RGB565_OES : GSP_BGR8_OES); }
+
+static void presentVideo(void) {
 	u16 *fb = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
 	memcpy(fb, pic, sizeof pic);
-	gfxFlushBuffers(); gfxSwapBuffers();
+	GSPGPU_FlushDataCache(fb, sizeof pic);
+	gfxScreenSwapBuffers(GFX_TOP, false);
+}
+
+static void messageBox(const char *title, const char *body) {
+	while (aptMainLoop()) {
+		hidScanInput(); ui_input(); u32 k = hidKeysDown();
+		ui_begin();
+		ui_top();
+		ui_round(30, 74, 340, 92, 14, C_CARD);
+		ui_circle(70, 120, 22, C_BAD); icon_cross(58, 108, 24, C_TEXT);
+		ui_textFit(104, 106, 0.72f, C_TEXT, AL_LEFT, 250, title);
+		ui_bottom();
+		ui_round(12, 14, 296, 150, 12, C_CARD);
+		ui_text(26, 28, 0.55f, C_TEXT, AL_LEFT, body);
+		bool ok = ui_button(100, 182, 120, 42, NULL, "OK", true, IC_NONE);
+		ui_end();
+		if ((k & (KEY_A | KEY_B)) || ok) break;
+	}
 }
 
 static int play(const char *path, const char *name) {      // 0 back to browser, 1 quit
-	consoleSelect(&botCon); consoleClear();
 	fv = fopen(path, "rb"); fa = fopen(path, "rb");
 	if (!fv || !fa || fread(&hd, sizeof hd, 1, fv) != 1 || memcmp(hd.magic, "N3V1", 4) || !hd.frames || !hd.fpsNum || !hd.keyCount) {
-		printf("\x1b[2;1HNot a playable .n3v file.\n\n B: back");
 		if (fv) fclose(fv);
 		if (fa) fclose(fa);
-		while (aptMainLoop()) { hidScanInput(); if (hidKeysDown() & (KEY_B | KEY_A)) break; gfxFlushBuffers(); gfxSwapBuffers(); gspWaitForVBlank(); }
+		messageBox("Can't play this file", "It isn't a playable .n3v video, or it\nwas damaged while copying.\n\nMake it again with the N3V converter\non your PC.");
 		return 0;
 	}
 	setvbuf(fv, NULL, _IOFBF, 64 * 1024); setvbuf(fa, NULL, _IOFBF, 32 * 1024);
@@ -189,13 +219,12 @@ static int play(const char *path, const char *name) {      // 0 back to browser,
 	if (useAudio) { ndspChnReset(0); ndspChnSetInterp(0, NDSP_INTERP_LINEAR); ndspChnSetRate(0, hd.rate); ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
 		float mix[12] = {1, 1}; ndspChnSetMix(0, mix); }
 
-	gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES); gfxSetDoubleBuffering(GFX_TOP, true);
-	memset(pic, 0, sizeof pic); present(); present();
-	char tot[16]; fmtTime(tot, (u32)((u64)hd.frames * hd.fpsDen / hd.fpsNum));
-	printf("\x1b[1;1H\x1b[37;1m%.38s\x1b[0m", name);
-	printf("\x1b[14;1HA  pause      L / R  back / ahead 10 s\n Up/Down  back / ahead 1 min\n B  stop     START  quit");
+	videoMode(true);
+	memset(pic, 0, sizeof pic); presentVideo(); presentVideo();
+	char tot[16]; u32 totSec = (u32)((u64)hd.frames * hd.fpsDen / hd.fpsNum); fmtTime(tot, totSec);
 
 	int result = 0; u32 seekTo = 0; bool paused = false, done = false;
+	int pfocus = 2;                                     // 0 Stop, 1 back 10 s, 2 play/pause, 3 ahead 10 s
 restart:;
 	u32 k = seekTo / hd.keyInt; if (k >= hd.keyCount) k = hd.keyCount - 1;
 	u32 base = readerStart(k), cur = base;
@@ -205,24 +234,10 @@ restart:;
 	u64 t0 = osGetTime(), pausedAt = 0;
 	if (paused) pausedAt = t0;
 	if (useAudio) { audioFeed(); ndspChnSetPaused(0, paused); }
-	u32 lastSec = ~0u, lates = 0;
+	bool dragging = false; float dragFrac = 0;
 
 	while (aptMainLoop()) {
-		hidScanInput(); u32 kd = hidKeysDown();
-		if (kd & KEY_START) { result = 1; break; }
-		if (kd & KEY_B) break;
-		if (kd & KEY_A) {
-			paused = !paused;
-			if (useAudio) ndspChnSetPaused(0, paused);
-			if (paused) pausedAt = osGetTime(); else t0 += osGetTime() - pausedAt;
-		}
-		s32 jump = (kd & KEY_R ? 10 : 0) - (kd & KEY_L ? 10 : 0) + (kd & KEY_UP ? 60 : 0) - (kd & KEY_DOWN ? 60 : 0);
-		if (jump) {
-			s64 f = (s64)cur + (s64)jump * hd.fpsNum / hd.fpsDen;
-			if (jump < 0) f -= hd.keyInt / 2;               // back: land a little before
-			seekTo = f < 0 ? 0 : f >= hd.frames ? hd.frames - 1 : f;
-			goto restart;
-		}
+		hidScanInput(); ui_input(); u32 kd = hidKeysDown();
 		u32 target;
 		if (useAudio) {
 			audioFeed();
@@ -233,33 +248,79 @@ restart:;
 		} else target = base + (u32)((paused ? pausedAt - t0 : osGetTime() - t0) * hd.fpsNum / (1000ull * hd.fpsDen));
 		if (target > hd.frames) target = hd.frames;
 		int budget = 6;
-		while (cur < target && budget-- > 0) { if (!decodeNext()) { lates++; break; } cur++; }
+		while (cur < target && budget-- > 0) { if (!decodeNext()) break; cur++; }
 		if (useAudio) audioFeed();
-		present();
+		presentVideo();
 
+		// ---- the bottom screen: player controls
 		u32 sec = (u32)((u64)cur * hd.fpsDen / hd.fpsNum);
-		if (sec != lastSec || (kd & KEY_A)) {
-			lastSec = sec; char now[16]; fmtTime(now, sec);
-			u32 bar = (u32)((u64)cur * 36 / hd.frames);
-			printf("\x1b[4;1H%s / %s  %s", now, tot, paused ? "PAUSED" : "      ");
-			printf("\x1b[6;1H"); for (u32 i = 0; i < 36; i++) putchar(i < bar ? '#' : '-');
-			printf("\x1b[8;1Hbuffer %2lu.%lu s video   %s", (vRead - vUsed) * hd.fpsDen / hd.fpsNum,
-			       (vRead - vUsed) * 10 * hd.fpsDen / hd.fpsNum % 10, useAudio ? "sound on " : "no sound ");
+		char now[16], line[64]; fmtTime(now, sec);
+		float frac = (float)cur / hd.frames, bufFrac = (float)(cur + (vRead - vUsed)) / hd.frames;
+		if (bufFrac > 1) bufFrac = 1;
+		ui_beginBottomOnly(); ui_bottom();
+		ui_rect(0, 0, 320, 40, C_HEAD);
+		icon_film(12, 11, 18, C_ACCENT2);
+		ui_textFit(38, 11, 0.6f, C_TEXT, AL_LEFT, 270, name);
+		// progress bar (tap or drag to jump)
+		const float BX = 20, BY = 84, BW = 280;
+		if (ui_touchIn(0, 62, 320, 50)) { float tx, ty; ui_touchPos(&tx, &ty); dragging = true; dragFrac = (tx - BX) / BW; }
+		if (dragFrac < 0) dragFrac = 0;
+		if (dragFrac > 1) dragFrac = 1;
+		float show = dragging ? dragFrac : frac;
+		ui_round(BX, BY, BW, 10, 5, C_CARD2);
+		ui_round(BX, BY, BW * bufFrac, 10, 5, C_LINE);
+		ui_round(BX, BY, BW * show < 10 ? 10 : BW * show, 10, 5, C_ACCENT);
+		ui_circle(BX + BW * show, BY + 5, dragging ? 11 : 8, C_TEXT);
+		if (dragging) { char p[16]; fmtTime(p, (u32)(dragFrac * totSec)); ui_text(BX + BW * show, BY - 26, 0.55f, C_ACCENT2, AL_CENTER, p); }
+		ui_text(BX, BY + 18, 0.52f, C_TEXT, AL_LEFT, now);
+		ui_text(BX + BW, BY + 18, 0.52f, C_MUTED, AL_RIGHT, tot);
+		if (paused) ui_text(160, BY + 18, 0.52f, C_ACCENT2, AL_CENTER, "PAUSED");
+		// buttons
+		if (kd & KEY_RIGHT) pfocus = (pfocus + 1) % 4;
+		if (kd & KEY_LEFT) pfocus = (pfocus + 3) % 4;
+		bool tStop = ui_button(12, 140, 68, 60, NULL, NULL, pfocus == 0, IC_STOP);
+		bool tBack = ui_button(88, 140, 68, 60, NULL, NULL, pfocus == 1, IC_BACK10);
+		bool tPlay = ui_button(164, 140, 68, 60, NULL, NULL, pfocus == 2, paused ? IC_PLAY : IC_PAUSE);
+		bool tAhead = ui_button(240, 140, 68, 60, NULL, NULL, pfocus == 3, IC_AHEAD10);
+		static const char *plabel[4] = { "Stop", "-10 s", NULL, "+10 s" };
+		for (int i = 0; i < 4; i++)
+			ui_text(46 + i * 76, 206, 0.45f, pfocus == i ? C_TEXT : C_MUTED, AL_CENTER, plabel[i] ? plabel[i] : paused ? "Play" : "Pause");
+		snprintf(line, sizeof line, "%s", useAudio ? "Sound on" : "No sound");
+		ui_text(160, 222, 0.42f, C_MUTED, AL_CENTER, line);
+		ui_end();
+
+		if (dragging && !ui_touchDown()) {                 // let go of the bar: jump there
+			dragging = false;
+			seekTo = (u32)(dragFrac * (hd.frames - 1));
+			goto restart;
 		}
-		if (cur >= hd.frames && !done) { done = true; }
-		if (done) break;
-		gspWaitForVBlank();
+		if (kd & KEY_START) { result = 1; break; }
+		int aF = (kd & KEY_A) ? pfocus : -1;               // A presses the highlighted button
+		if ((kd & KEY_B) || tStop || aF == 0) break;
+		if (tPlay || aF == 2) {
+			paused = !paused;
+			if (useAudio) ndspChnSetPaused(0, paused);
+			if (paused) pausedAt = osGetTime(); else t0 += osGetTime() - pausedAt;
+		}
+		s32 jump = ((kd & KEY_R) || tAhead || aF == 3 ? 10 : 0) - ((kd & KEY_L) || tBack || aF == 1 ? 10 : 0) + (kd & KEY_UP ? 60 : 0) - (kd & KEY_DOWN ? 60 : 0);
+		if (jump) {
+			s64 f = (s64)cur + (s64)jump * hd.fpsNum / hd.fpsDen;
+			if (jump < 0) f -= hd.keyInt / 2;               // back: land a little before
+			seekTo = f < 0 ? 0 : f >= hd.frames ? hd.frames - 1 : f;
+			goto restart;
+		}
+		if (cur >= hd.frames) { done = true; break; }
 	}
 	readerStop();
 	if (useAudio) audioReset();
 	free(keys); fclose(fv); fclose(fa);
-	if (done) svcSleepThread(500000000);
-	(void)lates;
+	if (done) svcSleepThread(400000000);
+	videoMode(false);
 	return result;
 }
 
 // ---------- browser ----------
-typedef struct { char name[256]; bool dir; } Ent;
+typedef struct { char name[256]; bool dir; bool info; s32 dur; u64 size; } Ent;
 static Ent *ents; static int nEnts;
 
 static int entCmp(const void *a, const void *b) {
@@ -277,20 +338,94 @@ static void listDir(const char *path) {
 		if (e->d_name[0] == '.') continue;
 		bool dir = e->d_type == DT_DIR;
 		if (!dir && !isN3v(e->d_name)) continue;
-		strncpy(ents[nEnts].name, e->d_name, 255); ents[nEnts].name[255] = 0; ents[nEnts].dir = dir; nEnts++;
+		strncpy(ents[nEnts].name, e->d_name, 255); ents[nEnts].name[255] = 0;
+		ents[nEnts].dir = dir; ents[nEnts].info = false; nEnts++;
 	}
 	closedir(d); qsort(ents, nEnts, sizeof(Ent), entCmp);
 }
 
-static void browserScreens(void) {
-	consoleInit(GFX_TOP, &topCon); consoleInit(GFX_BOTTOM, &botCon);
-	consoleSelect(&botCon);
-	printf("\x1b[1;1H\x1b[37;1mN3V Player\x1b[0m\n\n Shows folders and .n3v videos.\n Make .n3v files on a PC with\n n3vconvert.py (see the GitHub page).\n\n"
-	       " D-pad    move (left/right: page)\n A        open / play\n B        up a folder\n START    quit");
+static void entInfo(const char *path, Ent *e) {      // size and length, read when the row is first shown
+	if (e->info) return;
+	e->info = true; e->dur = -1; e->size = 0;
+	if (e->dir) return;
+	char full[1300]; snprintf(full, sizeof full, "%s%s", path, e->name);
+	FILE *f = fopen(full, "rb"); if (!f) return;
+	Hdr h;
+	if (fread(&h, sizeof h, 1, f) == 1 && !memcmp(h.magic, "N3V1", 4) && h.fpsNum) e->dur = (s32)((u64)h.frames * h.fpsDen / h.fpsNum);
+	fseek(f, 0, SEEK_END); e->size = ftell(f); fclose(f);
+}
+
+// decodes a keyframe ~1/8 into the video at half size for the preview picture
+static void loadThumb(const char *full) {
+	ui_thumbClear();
+	FILE *f = fopen(full, "rb"); if (!f) return;
+	Hdr h; u32 off, len; u8 *z = NULL;
+	if (fread(&h, sizeof h, 1, f) != 1 || memcmp(h.magic, "N3V1", 4) || !h.keyCount) goto out;
+	u32 k = h.keyCount > 8 ? h.keyCount / 8 : h.keyCount > 1 ? 1 : 0;
+	fseek(f, h.keyOff + k * 4, SEEK_SET);
+	if (fread(&off, 4, 1, f) != 1) goto out;
+	fseek(f, off, SEEK_SET);
+	if (fread(&len, 4, 1, f) != 1 || !len || len > sizeof dbuf * 2) goto out;
+	z = malloc(len); if (!z || fread(z, 1, len, f) != len) goto out;
+	uLongf dl = sizeof dbuf;
+	if (uncompress(dbuf, &dl, z, len) != Z_OK || !(dbuf[0] & 1)) goto out;
+	static u16 tb[200 * 120];
+	const u8 *p = dbuf + 1;
+	for (u32 b = 0; b < NBLK; b++, p += 8) {
+		u32 c0 = p[0] | p[1] << 8, c1 = p[2] | p[3] << 8, ix = p[4] | p[5] << 8 | p[6] << 16 | (u32)p[7] << 24;
+		u32 r0 = c0 >> 11, g0 = (c0 >> 5) & 63, b0 = c0 & 31, r1 = c1 >> 11, g1 = (c1 >> 5) & 63, b1 = c1 & 31;
+		u16 pal[4] = { c0, c1, ((2 * r0 + r1) / 3) << 11 | ((2 * g0 + g1) / 3) << 5 | (2 * b0 + b1) / 3,
+			((r0 + 2 * r1) / 3) << 11 | ((g0 + 2 * g1) / 3) << 5 | (b0 + 2 * b1) / 3 };
+		u32 bx = b / 60, by = b % 60;
+		for (int j = 0; j < 2; j++)
+			for (int i = 0; i < 2; i++) tb[(by * 2 + j) * 200 + bx * 2 + i] = pal[(ix >> (2 * ((j * 2 + 1) * 4 + i * 2 + 1))) & 3];
+	}
+	ui_thumbSet(tb, 200, 120);
+out:
+	free(z); fclose(f);
+}
+
+static void drawList(const char *path, int sel, float scroll, float selY) {
+	const float ROW = 32, LY = 36;
+	if (!nEnts) {
+		ui_circle(200, 96, 34, C_CARD);
+		icon_download(184, 80, 32, C_ACCENT2);
+		ui_text(200, 142, 0.72f, C_TEXT, AL_CENTER, "No videos here yet");
+		ui_text(200, 170, 0.55f, C_MUTED, AL_CENTER, "Choose From PC below to get videos,");
+		ui_text(200, 188, 0.55f, C_MUTED, AL_CENTER, "or copy .n3v files into this folder.");
+	} else {
+		ui_round(6, LY + selY - scroll, 382, ROW - 2, 9, C_ACCENT);
+		int first = (int)(scroll / ROW); if (first < 0) first = 0;
+		for (int i = first; i < nEnts && i < first + 8; i++) {
+			float y = LY + i * ROW - scroll;
+			Ent *e = &ents[i]; entInfo(path, e);
+			bool s = i == sel;
+			if (e->dir) icon_folder(16, y + 6, 18, s ? C_TEXT : C_FOLDER);
+			else icon_film(16, y + 6, 18, s ? C_TEXT : C_ACCENT2);
+			char right[48] = "";
+			if (!e->dir) {
+				char d[16] = "?", z[16]; if (e->dur >= 0) fmtTime(d, e->dur);
+				fmtSize(z, e->size); snprintf(right, sizeof right, "%s  \xC2\xB7  %s", d, z);
+			}
+			float rw = right[0] ? ui_text(380, y + 8, 0.5f, s ? C_TEXT : C_MUTED, AL_RIGHT, right) : 0;
+			ui_textFit(44, y + 6, 0.58f, C_TEXT, AL_LEFT, 380 - 44 - rw - 12, e->name);
+		}
+		if (nEnts > 6) {                                    // scroll bar
+			float th = 192.0f * 6 / nEnts, ty = LY + (192 - th) * (scroll / ((nEnts - 6) * ROW));
+			ui_round(393, LY, 4, 192, 2, C_CARD); ui_round(393, ty, 4, th, 2, C_MUTED);
+		}
+	}
+	ui_rect(0, 0, 400, 30, C_HEAD);                         // header on top of the scrolled rows
+	icon_film(10, 7, 17, C_ACCENT2);
+	ui_text(34, 6, 0.62f, C_TEXT, AL_LEFT, "N3V Player");
+	char shown[300]; snprintf(shown, sizeof shown, "SD card%s", path + 5);
+	if (strlen(shown) > 8 && shown[strlen(shown) - 1] == '/') shown[strlen(shown) - 1] = 0;
+	ui_textFit(392, 8, 0.5f, C_MUTED, AL_RIGHT, 230, shown);
 }
 
 int main(void) {
 	gfxInitDefault(); romfsInit(); osSetSpeedupEnable(true);
+	ui_init();
 	vring = malloc(VRING); aring = malloc(AQ * ABLK_BYTES); ents = malloc(1024 * sizeof(Ent));
 	audioOk = R_SUCCEEDED(ndspInit());
 	if (audioOk) {
@@ -300,52 +435,108 @@ int main(void) {
 	}
 	char path[1024] = "sdmc:/";
 	{ struct stat st; if (!stat("sdmc:/videos", &st) && S_ISDIR(st.st_mode)) strcpy(path, "sdmc:/videos/"); }
-	hidSetRepeatParameters(18, 4); browserScreens(); listDir(path);
-	int sel = 0, top = 0; bool redraw = true;
-	const int ROWS = 26;
+	hidSetRepeatParameters(18, 4); listDir(path);
+	int focus = 0;                                      // highlighted bottom button: 0 Play/Open, 1 Back, 2 From PC
+	int sel = 0, thumbFor = -2; float scroll = 0, selY = 0; u64 selChanged = 0;
+	const int ROWS = 6; const float ROW = 32;
 #ifdef N3V_AUTOTEST
 	for (int i = 0; i < nEnts; i++) if (!ents[i].dir) { sel = i; break; }
-	int autoKeys = 90;
+	int autoKeys = 200;
+#endif
+#ifdef N3V_NETTEST
+	int autoNet = 90;
 #endif
 	while (aptMainLoop()) {
-		hidScanInput(); u32 kd = hidKeysDown() | (hidKeysDownRepeat() & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT));
+		hidScanInput(); ui_input();
+		u32 kd = hidKeysDown() | (hidKeysDownRepeat() & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT));
 #ifdef N3V_AUTOTEST
 		if (autoKeys > 0 && --autoKeys == 0) kd |= KEY_A;
 #endif
-		if (kd & KEY_START) break;
+#ifdef N3V_NETTEST
+		if (autoNet > 0 && --autoNet == 0) kd |= KEY_Y;
+#endif
+		int oldSel = sel;
 		if (nEnts) {
 			if (kd & KEY_DOWN) sel = (sel + 1) % nEnts;
 			if (kd & KEY_UP) sel = (sel + nEnts - 1) % nEnts;
-			if (kd & KEY_RIGHT) { sel += ROWS; if (sel >= nEnts) sel = nEnts - 1; }
-			if (kd & KEY_LEFT) { sel -= ROWS; if (sel < 0) sel = 0; }
 		}
-		if ((kd & KEY_A) && nEnts) {
-			char full[1300]; snprintf(full, sizeof full, "%s%s", path, ents[sel].name);
-			if (ents[sel].dir) { if (strlen(full) < 1000) { snprintf(path, sizeof path, "%s/", full); listDir(path); sel = top = 0; } }
-			else { if (play(full, ents[sel].name)) break; browserScreens(); }
-			redraw = true;
+		if (sel != oldSel) selChanged = osGetTime();
+		// smooth scrolling and highlight
+		float wantScroll = scroll;
+		if (sel * ROW < wantScroll) wantScroll = sel * ROW;
+		if ((sel + 1) * ROW > wantScroll + ROWS * ROW) wantScroll = (sel + 1) * ROW - ROWS * ROW;
+		scroll += (wantScroll - scroll) * 0.35f; selY += (sel * ROW - selY) * 0.4f;
+		if (fabsf(wantScroll - scroll) < 0.5f) scroll = wantScroll;
+		if (fabsf(sel * ROW - selY) < 0.5f) selY = sel * ROW;
+		// preview picture, once the selection has rested a moment
+		Ent *cur = nEnts ? &ents[sel] : NULL;
+		if (cur && !cur->dir && thumbFor != sel && osGetTime() - selChanged > 180) {
+			char full[1300]; snprintf(full, sizeof full, "%s%s", path, cur->name); loadThumb(full); thumbFor = sel;
 		}
-		if ((kd & KEY_B) && strcmp(path, "sdmc:/")) {
+		if (cur && cur->dir && thumbFor != -1) { ui_thumbClear(); thumbFor = -1; }
+
+		bool atRoot = !strcmp(path, "sdmc:/");
+		bool avail[3] = { cur != NULL, !atRoot, true };
+		if (kd & KEY_RIGHT) for (int t = 0; t < 3; t++) { focus = (focus + 1) % 3; if (avail[focus]) break; }
+		if (kd & KEY_LEFT) for (int t = 0; t < 3; t++) { focus = (focus + 2) % 3; if (avail[focus]) break; }
+		if (!avail[focus]) focus = avail[0] ? 0 : 2;
+		ui_begin();
+		ui_top(); drawList(path, sel, scroll, selY);
+		ui_bottom();
+		bool tA = false, tB = false, tY = false, tPic = false;
+		if (!cur) {
+			ui_round(12, 12, 296, 160, 12, C_CARD);
+			ui_text(26, 22, 0.62f, C_ACCENT2, AL_LEFT, "Get videos onto your 3DS");
+			ui_text(26, 52, 0.52f, C_TEXT, AL_LEFT, "1.  On your PC, open the N3V converter\n     and convert a video.\n2.  Choose \"Yes, send it\".\n3.  Choose From PC below and type the\n     address your PC shows.");
+		} else if (cur->dir) {
+			ui_round(12, 12, 296, 160, 12, C_CARD);
+			icon_folder(128, 34, 64, C_FOLDER);
+			ui_textFit(160, 112, 0.66f, C_TEXT, AL_CENTER, 270, cur->name);
+			ui_text(160, 140, 0.5f, C_MUTED, AL_CENTER, "Folder");
+			tPic = ui_tapped(12, 12, 296, 160);
+		} else {
+			entInfo(path, cur);
+			ui_round(56, 8, 208, 128, 10, C_CARD);
+			if (!ui_thumbDraw(60, 12, 200, 120)) icon_film(130, 42, 60, C_CARD2);
+			else { ui_circle(160, 72, 20, UI_RGB(0, 0, 0) & 0x88FFFFFF); icon_play(152, 63, 18, C_TEXT); }
+			tPic = ui_tapped(56, 8, 208, 128);
+			ui_textFit(160, 140, 0.6f, C_TEXT, AL_CENTER, 296, cur->name);
+			char d[16] = "?", z[16], info[64]; if (cur->dur >= 0) fmtTime(d, cur->dur);
+			fmtSize(z, cur->size); snprintf(info, sizeof info, "%s  \xC2\xB7  %s", d, z);
+			ui_text(160, 162, 0.5f, C_MUTED, AL_CENTER, info);
+		}
+		if (cur) tA = ui_button(8, 190, 100, 42, NULL, cur->dir ? "Open" : "Play", focus == 0, cur->dir ? IC_FOLDER : IC_PLAY);
+		tB = ui_button(114, 190, 90, 42, NULL, "Back", focus == 1, IC_UP);
+		if (atRoot) ui_round(114, 190, 90, 42, 10, C_BG & 0x99FFFFFF);       // nothing to go back to
+		tY = ui_button(210, 190, 102, 42, NULL, "From PC", focus == 2, IC_DOWNLOAD);
+		ui_text(312, 176, 0.42f, C_MUTED, AL_RIGHT, "START: quit");
+		ui_end();
+
+		if (kd & KEY_START) break;
+		bool aOn = kd & KEY_A;                             // A presses the highlighted button
+		if (((aOn && focus == 0) || tA || tPic) && cur) {
+			char full[1300]; snprintf(full, sizeof full, "%s%s", path, cur->name);
+			if (cur->dir) {
+				if (strlen(full) < 1000) { snprintf(path, sizeof path, "%s/", full); listDir(path); sel = 0; scroll = selY = 0; thumbFor = -2; selChanged = osGetTime(); }
+			} else if (play(full, cur->name)) break;
+		}
+		if (((kd & KEY_B) || tB || (aOn && focus == 1)) && !atRoot) {
 			char *s = path + strlen(path) - 1; *s = 0; s = strrchr(path, '/'); s[1] = 0;
-			listDir(path); sel = top = 0; redraw = true;
+			listDir(path); sel = 0; scroll = selY = 0; thumbFor = -2; selChanged = osGetTime();
 		}
-		if (kd & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT)) redraw = true;
-		if (redraw) {
-			redraw = false;
-			if (sel < top) top = sel;
-			if (sel >= top + ROWS) top = sel - ROWS + 1;
-			consoleSelect(&topCon); consoleClear();
-			printf("\x1b[1;1H\x1b[36;1m%.48s\x1b[0m", path + 5);
-			if (!nEnts) printf("\x1b[4;2H(no folders or .n3v files here)");
-			for (int i = top; i < nEnts && i < top + ROWS; i++) {
-				printf("\x1b[%d;1H%s%c %s%.44s%s\x1b[0m", 3 + i - top, i == sel ? "\x1b[47;30m" : "", i == sel ? '>' : ' ',
-				       ents[i].dir ? "[" : "", ents[i].name, ents[i].dir ? "]" : "");
+		if ((kd & KEY_Y) || tY || (aOn && focus == 2)) {    // download from PC
+			char got[300];
+			if (net_download(got, sizeof got)) {
+				strcpy(path, DEST_DIR); listDir(path); sel = 0;
+				const char *nm = strrchr(got, '/') ? strrchr(got, '/') + 1 : got;
+				for (int i = 0; i < nEnts; i++) if (!strcmp(ents[i].name, nm)) { sel = i; break; }
+				scroll = selY = sel * ROW; thumbFor = -2; selChanged = 0;
 			}
 		}
-		gfxFlushBuffers(); gfxSwapBuffers(); gspWaitForVBlank();   // push the text out of the CPU cache, or the screen shows garbage
 	}
+	net_exit();
 	if (audioOk) { ndspExit(); linearFree(abuf); }
 	free(vring); free(aring); free(ents);
-	romfsExit(); gfxExit();
+	ui_exit(); romfsExit(); gfxExit();
 	return 0;
 }

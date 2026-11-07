@@ -195,12 +195,103 @@ def save_png(state, path):
                            + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
 
 
+# ------------------------------------------------------------------------------------------------ sending to the 3DS
+SHARE_PORT = 8690        # N3V Player asks this port unless the address it's given says another (ip:port)
+
+
+def local_ip():
+    s = __import__('socket').socket(2, 2)                    # AF_INET, SOCK_DGRAM: picks the adapter, sends nothing
+    try:
+        s.connect(('192.168.0.1', 9)); return s.getsockname()[0]
+    except OSError:
+        return '127.0.0.1'
+    finally:
+        s.close()
+
+
+def _own_port_server():
+    import http.server, socket
+    class OwnPortServer(http.server.ThreadingHTTPServer):
+        """Refuses a port another program already has (Python's default lets Windows share it silently)."""
+        allow_reuse_address = False
+        def handle_error(self, request, client_address):
+            pass                                             # a 3DS hanging up mid-request isn't worth a traceback
+        def server_bind(self):
+            if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            super().server_bind()
+    return OwnPortServer
+
+
+OwnPortServer = _own_port_server()
+
+
+class Share:
+    """Shares .n3v files with N3V Player over Wi-Fi.  GET /n3v/list -> "N3V-LIST\\n" + "size\\tname\\n" lines,
+    GET /n3v/file/<index> -> the file.  on_event(kind, *args): ('list', client), ('progress', i, sent, size),
+    ('sent', i), ('all', client)."""
+
+    def __init__(self, files, on_event=lambda *a: None):
+        import http.server, threading
+        self.files = [os.path.abspath(f) for f in files]
+        self.sizes = [os.path.getsize(f) for f in self.files]
+        self.done = [False] * len(self.files)
+        share = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+
+            def do_GET(self):
+                if self.path == '/n3v/list':
+                    body = ('N3V-LIST\n' + ''.join('%d\t%s\n' % (s, os.path.basename(f))
+                                                   for f, s in zip(share.files, share.sizes))).encode('utf-8')
+                    self.send_response(200); self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                    self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+                    on_event('list', self.client_address[0]); return
+                if not self.path.startswith('/n3v/file/') or not self.path[10:].isdigit() or int(self.path[10:]) >= len(share.files):
+                    return self.send_error(404)
+                i = int(self.path[10:]); size = share.sizes[i]
+                self.send_response(200); self.send_header('Content-Type', 'application/octet-stream')
+                self.send_header('Content-Length', str(size)); self.end_headers()
+                sent, last = 0, 0
+                slow = float(os.environ.get('N3V_SHARE_KBPS', 0))         # (testing: limit the speed)
+                try:
+                    with open(share.files[i], 'rb') as fh:
+                        while True:
+                            c = fh.read(1 << 16)
+                            if not c: break
+                            self.wfile.write(c); sent += len(c)
+                            if slow: time.sleep(len(c) / 1024 / slow)
+                            if sent - last >= 1 << 18 or sent == size:
+                                last = sent; on_event('progress', i, sent, size)
+                except OSError:
+                    on_event('progress', i, 0, size); return       # the 3DS cancelled or lost Wi-Fi
+                if sent == size:
+                    share.done[i] = True; on_event('sent', i)
+                    if all(share.done): on_event('all', self.client_address[0])
+
+        self.server = None
+        for port in range(SHARE_PORT, SHARE_PORT + 20):
+            try:
+                self.server = OwnPortServer(('0.0.0.0', port), H); break
+            except OSError:
+                continue
+        if not self.server: raise OSError('no free port for sharing')
+        self.port = self.server.server_address[1]
+        self.ip = local_ip()
+        self.address = self.ip if self.port == SHARE_PORT else '%s:%d' % (self.ip, self.port)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def stop(self):
+        if self.server: self.server.shutdown(); self.server.server_close(); self.server = None
+
+
 def fmt_time(s):
     s = int(round(s)); return '%d:%02d:%02d' % (s // 3600, s // 60 % 60, s % 60) if s >= 3600 else '%d:%02d' % (s // 60, s % 60)
 
 
 # ------------------------------------------------------------------------------------------------ the window
-def gui(files=(), autostart=False):
+def gui(files=(), autostart=False, autosend=False, autochoice=None, sendonly=None):
     import threading, queue
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
@@ -421,10 +512,15 @@ def gui(files=(), autostart=False):
                     else: plabel.config(text='Finished: %d of %d converted.' % (worker['done'], worker['total']),
                                         fg=OK if worker['done'] == worker['total'] else BAD)
                     if worker['last']:
-                        olabel.config(text='Copy the .n3v files to your 3DS\'s SD card, for example into a "videos" folder.', fg=MUTED)
+                        olabel.config(text='Send them to your 3DS with "Send to 3DS...", or copy them to the SD card yourself.', fg=MUTED)
                         open_btn.state(['!disabled'])
                     refresh()
-                    if autostart: root.after(1500, root.destroy)
+                    if autostart and not autosend and not autochoice: root.after(1500, root.destroy)
+                    elif worker['outs'] and not worker['cancel']:
+                        outs = list(worker['outs'])
+                        choice = autochoice if autochoice not in (None, 'ask') else ('yes' if autosend else ask_send(len(outs)))
+                        if choice == 'yes': send_window(outs)
+                        elif choice == 'install': install_then_send(outs)
         except queue.Empty:
             pass
         root.after(80, poll)
@@ -441,6 +537,141 @@ def gui(files=(), autostart=False):
             if os.name == 'nt': os.startfile(d)
             else: subprocess.Popen(['open' if sys.platform == 'darwin' else 'xdg-open', d])
 
+    def ask_send(n):
+        """No / Yes / "I don't have N3V Player on my 3DS" -> 'no', 'yes' or 'install'."""
+        d = tk.Toplevel(root); d.title('Send to your 3DS?'); d.configure(bg=BG); d.transient(root); d.resizable(False, False)
+        hd = tk.Frame(d, bg=DARK); hd.pack(fill='x')
+        tk.Label(hd, text='Converted %d video%s' % (n, '' if n == 1 else 's'), bg=DARK, fg='white',
+                 font=('Segoe UI Semibold', 14)).pack(anchor='w', padx=20, pady=(14, 0))
+        tk.Label(hd, text='Send %s to your 3DS over Wi-Fi now?' % ('it' if n == 1 else 'them'), bg=DARK, fg=ACCENT2,
+                 font=('Segoe UI', 10)).pack(anchor='w', padx=20, pady=(0, 14))
+        choice = {'v': 'no'}
+        def pick(v): choice['v'] = v; d.destroy()
+        row = tk.Frame(d, bg=BG); row.pack(fill='x', padx=20, pady=(16, 6))
+        ttk.Button(row, text='No', command=lambda: pick('no')).pack(side='left')
+        ttk.Button(row, text='Yes, send it', style='Accent.TButton', command=lambda: pick('yes')).pack(side='left', padx=8)
+        ttk.Button(row, text="I don't have N3V Player on my 3DS", command=lambda: pick('install')).pack(side='left')
+        tk.Label(d, text='(The last one walks you through installing it on the 3DS first, then sends.)',
+                 bg=BG, fg=MUTED, font=SMALL).pack(anchor='w', padx=20, pady=(0, 16))
+        d.protocol('WM_DELETE_WINDOW', lambda: pick('no'))
+        d.update_idletasks()
+        d.geometry('+%d+%d' % (root.winfo_rootx() + (root.winfo_width() - d.winfo_width()) // 2,
+                                root.winfo_rooty() + (root.winfo_height() - d.winfo_height()) // 3))
+        d.grab_set(); d.focus_set(); root.wait_window(d)
+        return choice['v']
+
+    def find_installer():
+        here = os.path.dirname(os.path.abspath(__file__))
+        for c in (os.path.join(here, '..', 'install_to_3ds.py'), os.path.join(here, '..', 'installer', 'install_to_3ds.py')):
+            if os.path.exists(c): return os.path.normpath(c)
+        return None
+
+    def install_then_send(paths):
+        """Runs install_to_3ds (its page shows the FBI steps); when N3V Player is installed, opens the Send window."""
+        inst = find_installer()
+        if not inst:
+            messagebox.showinfo('N3V Converter', "The installer (install_to_3ds.py) isn't next to the converter.\n\n"
+                                'Download the full N3V Player zip from github.com/kingarthurthe10th-ops/n3v-player/releases, '
+                                'run install_to_3ds.bat, then use "Send to 3DS...".'); return
+        stop = os.path.join(tempfile.gettempdir(), 'n3v_install_stop_%d' % os.getpid())
+        if os.path.exists(stop): os.remove(stop)
+        extra = os.environ.get('N3V_INSTALLER_ARGS', '').split()            # (for testing)
+        proc = subprocess.Popen([sys.executable, inst, '--stop-file', stop] + extra, creationflags=NOWIN,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        d = tk.Toplevel(root); d.title('Install N3V Player on your 3DS'); d.configure(bg=BG); d.transient(root); d.resizable(False, False)
+        hd = tk.Frame(d, bg=DARK); hd.pack(fill='x')
+        tk.Label(hd, text='Step 1: install N3V Player on your 3DS', bg=DARK, fg='white',
+                 font=('Segoe UI Semibold', 14)).pack(anchor='w', padx=20, pady=(14, 0))
+        tk.Label(hd, text="Step 2 (sending your videos) starts by itself when it's installed.", bg=DARK, fg=ACCENT2,
+                 font=('Segoe UI', 10)).pack(anchor='w', padx=20, pady=(0, 14))
+        tk.Label(d, text='A page with the steps just opened. In short, on the 3DS:\n\n'
+                         '   1.  Open FBI, choose Remote Install, then Scan QR Code.\n'
+                         '   2.  Scan the code on that page and press A to install.\n\n'
+                         '(Or in FBI choose Remote Install, then Receive URLs over the network:\n this PC finds the 3DS by itself.)',
+                 bg=BG, fg=TEXT, font=UI, justify='left').pack(anchor='w', padx=20, pady=16)
+        st = tk.Label(d, text='Waiting for the 3DS...', bg=BG, fg=MUTED, font=SMALL); st.pack(anchor='w', padx=20)
+        bb = tk.Frame(d, bg=BG); bb.pack(fill='x', padx=20, pady=14)
+        flags = {'cancelled': False}
+        def cancel():
+            flags['cancelled'] = True; open(stop, 'w').close(); st.config(text='Stopping...'); cb.state(['disabled'])
+        cb = ttk.Button(bb, text='Cancel', command=cancel); cb.pack(side='right')
+        d.protocol('WM_DELETE_WINDOW', cancel)
+        def watch():
+            if proc.poll() is None: d.after(300, watch); return
+            try: os.remove(stop)
+            except OSError: pass
+            d.destroy()
+            if proc.returncode == 0: send_window(paths)
+            elif not flags['cancelled']:
+                messagebox.showwarning('N3V Converter', "N3V Player wasn't installed. You can try again with "
+                                       'install_to_3ds.bat, then send with "Send to 3DS...".')
+        watch()
+
+    def send_window(paths):
+        """A window that shares paths and shows the address to type into N3V Player."""
+        try:
+            evq = queue.Queue(); share = Share(paths, lambda *a: evq.put(a))
+        except OSError as e:
+            messagebox.showerror('N3V Converter', 'Could not start sharing: %s' % e); return
+        w = tk.Toplevel(root); w.title('Send to your 3DS'); w.configure(bg=BG); w.geometry('640x560')
+        if not sendonly: w.transient(root)          # (a transient window hides along with a hidden main window)
+        hd = tk.Frame(w, bg=DARK); hd.pack(fill='x')
+        tk.Label(hd, text='Type this into N3V Player', bg=DARK, fg=ACCENT2, font=('Segoe UI', 11)).pack(pady=(16, 0))
+        tk.Label(hd, text=share.address, bg=DARK, fg='white', font=('Segoe UI Semibold', 34)).pack(pady=(0, 16))
+        _, c1 = card(tk.Frame(w, bg=BG, padx=18, pady=14), 'On the 3DS')
+        c1.master.master.pack(fill='x')
+        for t in ('1.  Open N3V Player (same Wi-Fi as this PC).',
+                  '2.  Press Y: Download from PC.',
+                  '3.  Type the address above and press OK. The videos go into the "videos" folder.'):
+            ttk.Label(c1, text=t, style='Card.TLabel').pack(anchor='w', pady=1)
+        lst = tk.Frame(w, bg=BG, padx=18); lst.pack(fill='both', expand=True)
+        rows = []
+        for pth in share.files:
+            r = tk.Frame(lst, bg=CARD, highlightbackground=LINE, highlightthickness=1); r.pack(fill='x', pady=3)
+            tk.Label(r, text=os.path.basename(pth), bg=CARD, fg=TEXT, font=UI, anchor='w').pack(side='left', padx=10, pady=6)
+            s = tk.Label(r, text='Waiting  (%.1f MB)' % (os.path.getsize(pth) / 1e6), bg=CARD, fg=MUTED, font=SMALL); s.pack(side='right', padx=10)
+            rows.append(s)
+        bar = ttk.Progressbar(w, maximum=1000); bar.pack(fill='x', padx=18, pady=(8, 2))
+        msg = tk.Label(w, text='Waiting for the 3DS...   (If Windows asks about Python and the firewall, allow it.)',
+                       bg=BG, fg=MUTED, font=SMALL, anchor='w', wraplength=600, justify='left'); msg.pack(fill='x', padx=18)
+        btns = tk.Frame(w, bg=BG); btns.pack(fill='x', padx=18, pady=12)
+        state = {'open': True}
+        def close():
+            state['open'] = False; share.stop(); w.destroy()
+            if sendonly: root.destroy()
+        closeb = ttk.Button(btns, text='Stop sharing', command=close); closeb.pack(side='right')
+        w.protocol('WM_DELETE_WINDOW', close)
+        total = sum(share.sizes) or 1; got = [0] * len(share.files)
+        def pump():
+            if not state['open']: return
+            try:
+                while True:
+                    ev = evq.get_nowait()
+                    if ev[0] == 'list':
+                        msg.config(text='Your 3DS (%s) connected. Sending...' % ev[1], fg=TEXT)
+                    elif ev[0] == 'progress':
+                        _, i, sent, size = ev; got[i] = sent
+                        rows[i].config(text='%d%%' % (100 * sent // max(1, size)), fg=ACCENT)
+                        bar['value'] = 1000 * sum(got) / total
+                    elif ev[0] == 'sent':
+                        rows[ev[1]].config(text='Sent', fg=OK); got[ev[1]] = share.sizes[ev[1]]
+                        bar['value'] = 1000 * sum(got) / total
+                    elif ev[0] == 'all':
+                        bar['value'] = 1000; share.stop()
+                        msg.config(text='All sent! They\'re in the "videos" folder on your 3DS.', fg=OK)
+                        closeb.config(text='Close')
+            except queue.Empty:
+                pass
+            w.after(100, pump)
+        pump()
+
+    def send_clicked():
+        outs = [o for o in worker.get('outs', []) if os.path.exists(o)]
+        if not outs:
+            outs = list(filedialog.askopenfilenames(title='Pick .n3v files to send', filetypes=[('N3V videos', '*.n3v')]))
+        if outs: send_window(outs)
+
+    send_btn = ttk.Button(abar, text='Send to 3DS...', command=send_clicked); send_btn.pack(side='left', padx=8)
     convert_btn = ttk.Button(abar, text='Convert', style='Accent.TButton', command=start); convert_btn.pack(side='right')
     cancel_btn = ttk.Button(abar, text='Stop', command=cancel); cancel_btn.pack(side='right', padx=8); cancel_btn.state(['disabled'])
     open_btn = ttk.Button(abar, text='Show converted file', command=open_folder); open_btn.pack(side='left'); open_btn.state(['disabled'])
@@ -451,6 +682,8 @@ def gui(files=(), autostart=False):
     root.protocol('WM_DELETE_WINDOW', on_close)
 
     refresh()
+    if sendonly:                                             # just the Send window (n3vconvert.py --sendonly a.n3v ...)
+        root.withdraw(); root.after(50, lambda: send_window(sendonly))
     if files: root.after(50, lambda: add_files(files))
     if autostart: root.after(600, start)
     poll()
@@ -458,9 +691,26 @@ def gui(files=(), autostart=False):
 
 
 def main():
+    if len(sys.argv) > 2 and sys.argv[1] == '--sendonly':
+        return gui(sendonly=sys.argv[2:])
     if len(sys.argv) == 1 or sys.argv[1] == '--gui':
-        args = [x for x in sys.argv[2:] if x != '--autostart']
-        return gui(args, '--autostart' in sys.argv)
+        test = [x for x in sys.argv[2:] if x.startswith('--auto')]           # (--autostart/--autosend/--autochoice=X: testing)
+        args = [x for x in sys.argv[2:] if x not in test]
+        choice = next((x.split('=', 1)[1] for x in test if x.startswith('--autochoice=')), None)
+        return gui(args, bool(test), '--autosend' in test, choice)
+    if sys.argv[1] == '--send':                              # share .n3v files until the 3DS has them all
+        done = __import__('threading').Event()
+        def ev(kind, *a):
+            if kind == 'list': print('3DS %s connected' % a[0])
+            elif kind == 'sent': print('  sent %s' % os.path.basename(sh.files[a[0]]))
+            elif kind == 'all': done.set()
+        sh = Share(sys.argv[2:], ev)
+        print('Sharing %d file(s). On the 3DS: N3V Player -> Y -> type  %s' % (len(sh.files), sh.address))
+        try:
+            while not done.wait(0.5): pass
+        except KeyboardInterrupt:
+            sh.stop(); return 1
+        print('All sent.'); sh.stop(); return 0
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('input'); ap.add_argument('output', nargs='?')
     ap.add_argument('--quality', type=int, default=3, choices=range(1, 6), help='1 small files .. 5 best picture (default 3)')

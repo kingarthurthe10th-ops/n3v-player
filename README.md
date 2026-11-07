@@ -11,7 +11,12 @@ There is no video codec on the 3DS side. The PC does the heavy work up front, an
 
 ## Install
 
-Download `N3VPlayer.cia` from [Releases](../../releases) and install it with FBI (or use `N3VPlayer.3dsx` with the Homebrew Launcher). Sound needs `sdmc:/3ds/dspfirm.cdc`, which most homebrew setups already have (dump it with DSP1 if not).
+Download **`N3VPlayer-1.0.0.zip`** from [Releases](../../releases) and unzip it. Inside:
+
+- `N3VPlayer.cia`: install it with FBI. Or copy `N3VPlayer.3dsx` to `sdmc:/3ds/` and open it from the Homebrew Launcher. You only need one of the two.
+- `converter/`: the video converter (see below).
+
+Sound needs `sdmc:/3ds/dspfirm.cdc`, which most homebrew setups already have (dump it with DSP1 if not).
 
 ## Convert a video
 

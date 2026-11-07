@@ -1,0 +1,13 @@
+build/
+dist/
+romfs/
+test/
+*.elf
+*.3dsx
+*.smdh
+*.cia
+*.n3v
+*_preview.png
+meta/*.bnr
+meta/*.icn
+__pycache__/

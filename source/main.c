@@ -180,7 +180,7 @@ static int play(const char *path, const char *name) {      // 0 back to browser,
 		printf("\x1b[2;1HNot a playable .n3v file.\n\n B: back");
 		if (fv) fclose(fv);
 		if (fa) fclose(fa);
-		while (aptMainLoop()) { hidScanInput(); if (hidKeysDown() & (KEY_B | KEY_A)) break; gspWaitForVBlank(); }
+		while (aptMainLoop()) { hidScanInput(); if (hidKeysDown() & (KEY_B | KEY_A)) break; gfxFlushBuffers(); gfxSwapBuffers(); gspWaitForVBlank(); }
 		return 0;
 	}
 	setvbuf(fv, NULL, _IOFBF, 64 * 1024); setvbuf(fa, NULL, _IOFBF, 32 * 1024);
@@ -342,7 +342,7 @@ int main(void) {
 				       ents[i].dir ? "[" : "", ents[i].name, ents[i].dir ? "]" : "");
 			}
 		}
-		gspWaitForVBlank();
+		gfxFlushBuffers(); gfxSwapBuffers(); gspWaitForVBlank();   // push the text out of the CPU cache, or the screen shows garbage
 	}
 	if (audioOk) { ndspExit(); linearFree(abuf); }
 	free(vring); free(aring); free(ents);

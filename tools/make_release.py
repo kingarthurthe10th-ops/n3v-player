@@ -5,8 +5,10 @@ txt = f"""N3V Player {v}
 ================
 
 Install on the 3DS (pick ONE):
-  N3VPlayer.cia   - install with FBI; it then appears on the HOME Menu.
-  N3VPlayer.3dsx  - or copy to sdmc:/3ds/ and open it from the Homebrew Launcher.
+  install_to_3ds.bat - easiest: opens a page with the steps and sends
+                       N3VPlayer.cia to FBI over Wi-Fi (QR code or automatic).
+  N3VPlayer.cia      - or install it with FBI yourself.
+  N3VPlayer.3dsx     - or copy to sdmc:/3ds/ and open it from the Homebrew Launcher.
 
 Make videos for it (Windows):
   Double-click converter/setup.bat. The first time it installs what it needs
@@ -20,7 +22,8 @@ More: https://github.com/kingarthurthe10th-ops/n3v-player
 out = f'dist/N3VPlayer-{v}.zip'
 with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
     for src, dst in (('dist/N3VPlayer.cia', 'N3VPlayer.cia'), ('dist/N3VPlayer.3dsx', 'N3VPlayer.3dsx'),
-                     ('converter/setup.bat', 'converter/setup.bat'), ('converter/convert.bat', 'converter/convert.bat'),
+                     ('installer/install_to_3ds.bat', 'install_to_3ds.bat'),
+                     ('installer/install_to_3ds.py', 'install_to_3ds.py'), ('converter/setup.bat', 'converter/setup.bat'), ('converter/convert.bat', 'converter/convert.bat'),
                      ('converter/n3vconvert.py', 'converter/n3vconvert.py'), ('LICENSE', 'LICENSE.txt')):
         z.write(src, 'N3VPlayer/' + dst)
     z.writestr('N3VPlayer/README.txt', txt.replace('\n', '\r\n'))

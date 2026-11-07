@@ -67,10 +67,26 @@ def encode_blocks(B):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('input'); ap.add_argument('output', nargs='?')
+    ap.add_argument('input', nargs='?', help='video to convert (leave out to pick videos in a window)')
+    ap.add_argument('output', nargs='?')
     ap.add_argument('--quality', type=int, default=3, choices=range(1, 6), help='1 small files .. 5 best picture (default 3)')
     ap.add_argument('--preview', type=int, metavar='FRAME', help='also save what the 3DS shows at this frame as a PNG')
     a = ap.parse_args()
+    if a.input:
+        return convert(a)
+    import tkinter, tkinter.filedialog
+    root = tkinter.Tk(); root.withdraw()
+    files = tkinter.filedialog.askopenfilenames(title='Pick videos to convert for N3V Player',
+                                                filetypes=[('Videos', '*.mp4 *.mkv *.webm *.avi *.mov *.m4v *.flv *.wmv'), ('All files', '*.*')])
+    root.destroy()
+    for f in files:
+        a.input, a.output = f, None
+        try: convert(a)
+        except Exception as e: print('  failed: %s' % e)
+    if not files: print('No videos picked.')
+
+
+def convert(a):
     out = a.output or os.path.splitext(a.input)[0] + '.n3v'
     thr = {1: 260, 2: 150, 3: 90, 4: 50, 5: 25}[a.quality]              # block error (mean squared) that forces an update
 

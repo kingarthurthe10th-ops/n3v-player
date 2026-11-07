@@ -11,3 +11,4 @@ test/
 meta/*.bnr
 meta/*.icn
 __pycache__/
+.venv/

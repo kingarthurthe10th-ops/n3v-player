@@ -15,14 +15,16 @@ Download `N3VPlayer.cia` from [Releases](../../releases) and install it with FBI
 
 ## Convert a video
 
-Needs Python 3.8+ and two packages (`imageio-ffmpeg` brings its own ffmpeg):
+**Windows, easiest:** double-click `converter/setup.bat`. The first time, it installs everything the converter needs: Python 3.12 from python.org (only if you don't have Python 3.9+ already), then numpy and imageio-ffmpeg (which brings its own ffmpeg) into a private `.venv` folder beside it. Then it opens a window to pick videos, and writes an `.n3v` next to each one. Later runs skip straight to the picker. You can also drag videos onto `setup.bat` or `convert.bat`.
+
+**Any system, by hand:** needs Python 3.8+ and two packages:
 
 ```
 pip install numpy imageio-ffmpeg
 python converter/n3vconvert.py "my video.mp4"
 ```
 
-That writes `my video.n3v` next to it. On Windows you can drag videos onto `converter/convert.bat` instead. Anything ffmpeg can read works (MP4, MKV, WebM, AVI...). Videos above 30 fps are halved (60 becomes 30), and the picture is fitted to 400x240 with black bars.
+Leave out the file name to pick videos in a window. Anything ffmpeg can read works (MP4, MKV, WebM, AVI...). Videos above 30 fps are halved (60 becomes 30), and the picture is fitted to 400x240 with black bars.
 
 Options: `--quality 1`..`5` (default 3; higher means a better picture and bigger files), `--preview N` saves frame N as the 3DS will show it.
 

@@ -1,4 +1,12 @@
 #pragma once
+// test builds: N3V_SHOTS saves screenshots of each screen to sdmc:/n3v_shots (N3V_SHOTSNET: the download screens)
+#ifdef N3V_SHOTSNET
+#define N3V_NETTEST
+#define N3V_SHOTS
+#endif
+#if defined(N3V_SHOTS) && !defined(N3V_NETTEST)
+#define N3V_AUTOTEST
+#endif
 // Small drawing toolkit on citro2d: colours, rounded cards, text in the 3DS system font, icons, touch.
 #include <citro2d.h>
 #include <stdbool.h>
@@ -65,7 +73,8 @@ bool ui_touchDown(void);
 bool ui_touchIn(float x, float y, float w, float h);       // finger is down inside
 bool ui_tapped(float x, float y, float w, float h);        // released inside this frame (and started inside)
 void ui_touchPos(float *x, float *y);
-void ui_fake(int down, float x, float y);   // tests: -1 = real touch
+void ui_fake(int down, float x, float y);
+void ui_shot(const char *name, const u16 *videoPic);   // tests: saves both screens (videoPic = the top's video)   // tests: -1 = real touch
 
 // the preview picture (RGB565, row-major, up to 256x128)
 void ui_thumbSet(const u16 *px, int w, int h);

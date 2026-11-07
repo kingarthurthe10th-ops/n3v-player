@@ -1,6 +1,8 @@
 #include "ui.h"
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
+#include <sys/stat.h>
 
 static C3D_RenderTarget *tTop, *tBot;
 static C2D_TextBuf tbuf;
@@ -202,4 +204,17 @@ bool ui_thumbDraw(float x, float y, float w, float h) {
 	if (!thumbOk || !thumbImg.subtex) return false;
 	C2D_DrawImageAt(thumbImg, x, y, 0.5f, NULL, w / thumbSub.width, h / thumbSub.height);
 	return true;
+}
+
+void ui_shot(const char *name, const u16 *videoPic) {
+	mkdir("sdmc:/n3v_shots", 0777);
+	char p[96]; snprintf(p, sizeof p, "sdmc:/n3v_shots/%s.raw", name);
+	FILE *f = fopen(p, "wb"); if (!f) return;
+	u32 fmt = videoPic ? 2 : 1;                 // top: 1 = BGR8 framebuffer, 2 = RGB565 video picture
+	fwrite("N3VS", 1, 4, f); fwrite(&fmt, 4, 1, f);
+	if (videoPic) fwrite(videoPic, 2, 240 * 400, f);
+	else { u8 *fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL); GSPGPU_InvalidateDataCache(fb, 240 * 400 * 3); fwrite(fb, 1, 240 * 400 * 3, f); }
+	u8 *fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL); GSPGPU_InvalidateDataCache(fb, 240 * 320 * 3);
+	fwrite(fb, 1, 240 * 320 * 3, f);
+	fclose(f);
 }

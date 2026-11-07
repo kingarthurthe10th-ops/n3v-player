@@ -1,5 +1,7 @@
 # N3V Player
 
+![File list](screenshots/2_list.png) ![Player](screenshots/3_player.png) ![Download from PC](screenshots/4_download.png)
+
 A native video player for the Nintendo 3DS (old and New). Convert any video on your PC into an `.n3v` file, copy it to the SD card, and play it from a simple file browser.
 
 There is no video codec on the 3DS side. The PC does the heavy work up front, and the 3DS only runs cheap native C:
@@ -11,7 +13,7 @@ There is no video codec on the 3DS side. The PC does the heavy work up front, an
 
 ## Install
 
-Download the latest **`N3VPlayer-x.y.z.zip`** from [Releases](../../releases/latest) and unzip it. Inside:
+Download **`N3VPlayer.zip`** from the [latest release](../../releases/latest) and unzip it. Inside:
 
 - `install_to_3ds.bat`: the easiest way. It opens a page with the steps and sends `N3VPlayer.cia` to FBI on your 3DS over Wi-Fi: scan the page's QR code with FBI's **Remote Install > Scan QR Code**, or pick **Remote Install > Receive URLs over the network** and it finds the 3DS by itself. When the install is done, the page closes and the result shows in the console. (Needs Python; `converter/setup.bat` installs it. Any .cia works: `python install_to_3ds.py other.cia`.)
 - `N3VPlayer.cia`: or install it with FBI yourself. Or copy `N3VPlayer.3dsx` to `sdmc:/3ds/` and open it from the Homebrew Launcher. You only need one of the two.

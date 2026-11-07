@@ -130,6 +130,10 @@ static u64 lastDraw;
 static void redraw(bool force) {
 	if (!force && osGetTime() - lastDraw < 40) return;
 	lastDraw = osGetTime(); netDraw();
+#ifdef N3V_SHOTS
+	static bool shot;
+	if (!shot && N.phase == PH_LOAD && N.total && N.got * 2 >= N.total) { shot = true; netDraw(); ui_shot("4_download", NULL); }
+#endif
 }
 
 static bool cancelPressed(void) {                // B, or Cancel tapped

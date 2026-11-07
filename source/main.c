@@ -319,6 +319,9 @@ restart:;
 		snprintf(line, sizeof line, "%s", useAudio ? "Sound on" : "No sound");
 		ui_text(160, 222, 0.42f, C_MUTED, AL_CENTER, line);
 		ui_end();
+#ifdef N3V_SHOTS
+		{ static int pfr; if (++pfr == 200) ui_shot("3_player", pic); }
+#endif
 
 		if (dragging && !wasDragging) {                    // started dragging: stop reading, hush the sound
 			readerStop();
@@ -431,7 +434,7 @@ static void drawList(const char *path, int sel, float scroll, float selY) {
 		icon_download(184, 80, 32, C_ACCENT2);
 		ui_text(200, 142, 0.72f, C_TEXT, AL_CENTER, "No videos here yet");
 		ui_text(200, 170, 0.55f, C_MUTED, AL_CENTER, "Choose From PC below to get videos,");
-		ui_text(200, 188, 0.55f, C_MUTED, AL_CENTER, "or copy .n3v files into this folder.");
+		ui_text(200, 188, 0.55f, C_MUTED, AL_CENTER, "or make them with the N3V converter (GitHub).");
 	} else {
 		ui_round(6, LY + selY - scroll, 382, ROW - 2, 9, C_ACCENT);
 		int first = (int)(scroll / ROW); if (first < 0) first = 0;
@@ -462,6 +465,53 @@ static void drawList(const char *path, int sel, float scroll, float selY) {
 	ui_textFit(392, 8, 0.5f, C_MUTED, AL_RIGHT, 230, shown);
 }
 
+// first launch: where to get the converter (with a QR code for the phone)
+#include "qr.h"
+#define NOTICE_FLAG "sdmc:/3ds/n3vplayer/converter_notice_seen"
+
+static void converterNotice(bool always) {
+	struct stat st;
+	if (!always && !stat(NOTICE_FLAG, &st)) return;
+	for (int fr = 0; aptMainLoop(); fr++) {
+		hidScanInput(); ui_input(); u32 k = hidKeysDown();
+		ui_begin();
+		ui_top();
+		ui_rect(0, 0, 400, 30, C_HEAD);
+		icon_film(10, 7, 17, C_ACCENT2);
+		ui_text(34, 6, 0.62f, C_TEXT, AL_LEFT, "Welcome to N3V Player");
+		ui_round(14, 42, 372, 186, 14, C_CARD);
+		ui_text(30, 54, 0.66f, C_ACCENT2, AL_LEFT, "Get the free N3V converter");
+		ui_text(30, 84, 0.52f, C_TEXT, AL_LEFT,
+		        "N3V Player plays .n3v videos. To make them\n"
+		        "from your own MP4s, use the N3V converter\n"
+		        "on a Windows PC. It can also send videos\n"
+		        "straight to this 3DS over Wi-Fi.");
+		ui_text(30, 168, 0.5f, C_MUTED, AL_LEFT, "Download it from:");
+		ui_text(30, 188, 0.52f, C_TEXT, AL_LEFT, "github.com/kingarthurthe10th-ops/n3v-player");
+		ui_bottom();
+		const float M = 4, SZ = (QR_N + 4) * M, QX = 160 - SZ / 2, QY = 8;
+		ui_round(QX, QY, SZ, SZ, 8, UI_RGB(255, 255, 255));
+		for (int y = 0; y < QR_N; y++)
+			for (int x = 0; x < QR_N; x++)
+				if (QR_ROWS[y][x] == '#') ui_rect(QX + (x + 2) * M, QY + (y + 2) * M, M, M, UI_RGB(0, 0, 0));
+		ui_text(160, QY + SZ + 2, 0.45f, C_MUTED, AL_CENTER, "Scan with your phone to open the page");
+		bool ok = ui_button(100, 196, 120, 38, NULL, "OK", true, IC_NONE);
+		ui_end();
+#ifdef N3V_SHOTS
+		if (fr == 60) ui_shot("1_notice", NULL);
+#endif
+#if defined(N3V_AUTOTEST) || defined(N3V_NETTEST)
+		if (fr > 100) break;                            // test builds: close it by themselves, remember nothing
+		continue;
+#endif
+		if ((k & (KEY_A | KEY_B | KEY_START)) || ok) {
+			mkdir("sdmc:/3ds", 0777); mkdir("sdmc:/3ds/n3vplayer", 0777);
+			FILE *f = fopen(NOTICE_FLAG, "w"); if (f) { fputs("1", f); fclose(f); }
+			break;
+		}
+	}
+}
+
 int main(void) {
 	gfxInitDefault(); romfsInit(); osSetSpeedupEnable(true);
 	ui_init();
@@ -474,7 +524,7 @@ int main(void) {
 	}
 	char path[1024] = "sdmc:/";
 	{ struct stat st; if (!stat("sdmc:/videos", &st) && S_ISDIR(st.st_mode)) strcpy(path, "sdmc:/videos/"); }
-	hidSetRepeatParameters(18, 4); listDir(path);
+	hidSetRepeatParameters(18, 4); converterNotice(false); listDir(path);
 	int focus = 0;                                      // highlighted bottom button: 0 Play/Open, 1 Back, 2 From PC
 	int sel = 0, thumbFor = -2; float scroll = 0, selY = 0; u64 selChanged = 0;
 	const int ROWS = 6; const float ROW = 32;
@@ -550,6 +600,9 @@ int main(void) {
 		tY = ui_button(210, 190, 102, 42, NULL, "From PC", focus == 2, IC_DOWNLOAD);
 		ui_text(312, 176, 0.42f, C_MUTED, AL_RIGHT, "START: quit");
 		ui_end();
+#ifdef N3V_SHOTS
+		{ static int bfr; if (++bfr == 120) ui_shot("2_list", NULL); }
+#endif
 
 		if (kd & KEY_START) break;
 		bool aOn = kd & KEY_A;                             // A presses the highlighted button

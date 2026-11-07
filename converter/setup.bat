@@ -1,7 +1,7 @@
 @echo off
 rem N3V converter for Windows: installs what it needs the first time (Python 3.12 if missing, then numpy and
 rem imageio-ffmpeg with its own ffmpeg, in a private .venv folder here), then opens the converter.
-rem Run it on its own to pick videos in a window, or drag videos onto it.
+rem Run it on its own, or drag videos onto it to start with them in the list.
 setlocal
 cd /d "%~dp0"
 set "VPY=%~dp0.venv\Scripts\python.exe"
@@ -35,15 +35,8 @@ echo Installing numpy and ffmpeg (imageio-ffmpeg)...
 "%VPY%" -c "import numpy, imageio_ffmpeg; print('ffmpeg ready:', imageio_ffmpeg.get_ffmpeg_exe())" || goto fail
 
 :run
-echo.
-if "%~1"=="" (
-	"%VPY%" n3vconvert.py
-) else (
-	for %%f in (%*) do "%VPY%" n3vconvert.py "%%~f"
-)
-echo.
-echo Done. Copy the .n3v files to your 3DS's SD card (for example into a "videos" folder).
-pause
+rem open the converter window (with any videos dropped on this file) and close this console
+start "" "%~dp0.venv\Scripts\pythonw.exe" "%~dp0n3vconvert.py" --gui %*
 exit /b 0
 
 :fail

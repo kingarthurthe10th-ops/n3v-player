@@ -11,7 +11,7 @@ There is no video codec on the 3DS side. The PC does the heavy work up front, an
 
 ## Install
 
-Download **`N3VPlayer-1.0.0.zip`** from [Releases](../../releases) and unzip it. Inside:
+Download the latest **`N3VPlayer-x.y.z.zip`** from [Releases](../../releases/latest) and unzip it. Inside:
 
 - `N3VPlayer.cia`: install it with FBI. Or copy `N3VPlayer.3dsx` to `sdmc:/3ds/` and open it from the Homebrew Launcher. You only need one of the two.
 - `converter/`: the video converter (see below).
@@ -20,7 +20,7 @@ Sound needs `sdmc:/3ds/dspfirm.cdc`, which most homebrew setups already have (du
 
 ## Convert a video
 
-**Windows, easiest:** double-click `converter/setup.bat`. The first time, it installs everything the converter needs: Python 3.12 from python.org (only if you don't have Python 3.9+ already), then numpy and imageio-ffmpeg (which brings its own ffmpeg) into a private `.venv` folder beside it. Then it opens a window to pick videos, and writes an `.n3v` next to each one. Later runs skip straight to the picker. You can also drag videos onto `setup.bat` or `convert.bat`.
+**Windows, easiest:** double-click `converter/setup.bat`. The first time, it installs everything the converter needs: Python 3.12 from python.org (only if you don't have Python 3.9+ already), then numpy and imageio-ffmpeg (which brings its own ffmpeg) into a private `.venv` folder beside it. Then it opens the converter window: add videos, see exactly where each `.n3v` will be saved (next to the video, or a folder you pick), choose the picture quality and press **Convert**. Later runs open the window straight away. You can also drag videos onto `setup.bat` or `convert.bat` to start with them in the list.
 
 **Any system, by hand:** needs Python 3.8+ and two packages:
 
@@ -29,7 +29,7 @@ pip install numpy imageio-ffmpeg
 python converter/n3vconvert.py "my video.mp4"
 ```
 
-Leave out the file name to pick videos in a window. Anything ffmpeg can read works (MP4, MKV, WebM, AVI...). Videos above 30 fps are halved (60 becomes 30), and the picture is fitted to 400x240 with black bars.
+Run it without a file name (or with `--gui video1.mp4 ...`) for the converter window. Anything ffmpeg can read works (MP4, MKV, WebM, AVI...). Videos above 30 fps are halved (60 becomes 30), and the picture is fitted to 400x240 with black bars.
 
 Options: `--quality 1`..`5` (default 3; higher means a better picture and bigger files), `--preview N` saves frame N as the 3DS will show it.
 

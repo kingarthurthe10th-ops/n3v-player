@@ -2,7 +2,7 @@
 # Builds dist/N3VPlayer.cia and dist/N3VPlayer.3dsx.  ./build.sh autotest = plays the first .n3v by itself (emulator tests)
 set -e; cd "$(dirname "$0")"; ROOT="$(pwd)"
 CTR="${CTRTOOLS:-$HOME/Tools/ctrtools}"        # folder with makerom and bannertool
-EXTRA=""; [ "$1" = autotest ] && EXTRA="-DN3V_AUTOTEST"; [ "$1" = nettest ] && EXTRA="-DN3V_NETTEST"
+EXTRA=""; [ "$1" = autotest ] && EXTRA="-DN3V_AUTOTEST"; [ "$1" = nettest ] && EXTRA="-DN3V_NETTEST"; [ "$1" = scrubtest ] && EXTRA="-DN3V_SCRUBTEST"
 [ -f icon.png ] && [ -f meta/banner.png ] || python tools/gen_meta.py
 mkdir -p romfs
 ./dkp.sh "$ROOT" make clean > /dev/null

@@ -65,6 +65,7 @@ bool ui_touchDown(void);
 bool ui_touchIn(float x, float y, float w, float h);       // finger is down inside
 bool ui_tapped(float x, float y, float w, float h);        // released inside this frame (and started inside)
 void ui_touchPos(float *x, float *y);
+void ui_fake(int down, float x, float y);   // tests: -1 = real touch
 
 // the preview picture (RGB565, row-major, up to 256x128)
 void ui_thumbSet(const u16 *px, int w, int h);

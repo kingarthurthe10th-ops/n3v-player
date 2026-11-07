@@ -133,11 +133,15 @@ void icon_up(float x, float y, float s, u32 c) {
 
 // ---- touch
 static touchPosition tp; static bool down, wasDown; static float startX, startY, lastX, lastY;
+static int fakeOn = -1; static float fakeX, fakeY;
+void ui_fake(int d, float x, float y) { fakeOn = d; fakeX = x; fakeY = y; }     // (self-driving tests)
 void ui_input(void) {
 	wasDown = down;
 	down = hidKeysHeld() & KEY_TOUCH;
+	if (fakeOn >= 0) down = fakeOn;
 	if (down) {
-		hidTouchRead(&tp); lastX = tp.px; lastY = tp.py;
+		if (fakeOn >= 0) { tp.px = (u16)fakeX; tp.py = (u16)fakeY; } else hidTouchRead(&tp);
+		lastX = tp.px; lastY = tp.py;
 		if (!wasDown) { startX = lastX; startY = lastY; }
 	}
 }

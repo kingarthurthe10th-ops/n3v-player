@@ -13,6 +13,9 @@
 #include <math.h>
 #include "net.h"
 #include "ui.h"
+#ifdef N3V_SCRUBTEST                      // drags the bar by itself: 40 -> 230 px, lets go at the 15 s mark
+#define N3V_AUTOTEST
+#endif
 
 #define W 400
 #define H 240
@@ -68,15 +71,15 @@ static void readerMain(void *arg) {
 
 static void readerStop(void) { if (rth) { running = false; threadJoin(rth, U64_MAX); threadFree(rth); rth = NULL; } }
 
-// start reading at keyframe k; returns its frame number
-static u32 readerStart(u32 k) {
+// start reading video at keyframe k and sound at audioFrame; returns the keyframe's frame number
+static u32 readerStart(u32 k, u32 audioFrame) {
 	readerStop();
 	u32 frame = k * hd.keyInt;
 	fseek(fv, keys[k], SEEK_SET);
 	vw = vr = vRead = vUsed = 0; vNextFrame = frame;
 	aRead = aUsed = 0; aLeft = 0;
 	if (hd.rate) {
-		u64 pk = (u64)frame * hd.fpsDen * hd.rate / hd.fpsNum / 64;
+		u64 pk = (u64)audioFrame * hd.fpsDen * hd.rate / hd.fpsNum / 64;
 		u64 off = pk * 68; if (off > hd.audioBytes) off = hd.audioBytes;
 		fseek(fa, hd.audioOff + off, SEEK_SET); aLeft = hd.audioBytes - off;
 	}
@@ -119,6 +122,18 @@ static bool decodeNext(void) {     // false if the reader hasn't got the frame y
 	}
 	__sync_synchronize(); vr = at + 4 + len; vUsed++;
 	return true;
+}
+
+static void showKeyframe(u32 k) {     // the reader thread must be stopped
+	static u8 *zb; static u32 zcap; u32 len;
+	fseek(fv, keys[k], SEEK_SET);
+	if (fread(&len, 4, 1, fv) != 1 || !len || len > 4 * sizeof dbuf) return;
+	if (len > zcap) { u8 *n = realloc(zb, len); if (!n) return; zb = n; zcap = len; }
+	if (fread(zb, 1, len, fv) != len) return;
+	uLongf dl = sizeof dbuf;
+	if (uncompress(dbuf, &dl, zb, len) != Z_OK || !(dbuf[0] & 1)) return;
+	const u8 *p = dbuf + 1;
+	for (u32 b = 0; b < NBLK; b++, p += 8) blockDraw(b, p);
 }
 
 // ---------- audio ----------
@@ -226,20 +241,36 @@ static int play(const char *path, const char *name) {      // 0 back to browser,
 	int result = 0; u32 seekTo = 0; bool paused = false, done = false;
 	int pfocus = 2;                                     // 0 Stop, 1 back 10 s, 2 play/pause, 3 ahead 10 s
 restart:;
+	if (seekTo >= hd.frames) seekTo = hd.frames - 1;
 	u32 k = seekTo / hd.keyInt; if (k >= hd.keyCount) k = hd.keyCount - 1;
-	u32 base = readerStart(k), cur = base;
+	u32 cur = readerStart(k, seekTo);
 	if (useAudio) audioReset();
-	u64 baseSample = (u64)base * hd.fpsDen * hd.rate / hd.fpsNum / 64 * 64;
-	for (int t = 0; t < 120 && (vRead < 45 && vNextFrame < hd.frames); t++) svcSleepThread(10000000);  // pre-buffer
+	u64 baseSample = (u64)seekTo * hd.fpsDen * hd.rate / hd.fpsNum / 64 * 64;
+	// decode from the keyframe up to the exact frame, so the picture lands right where the bar was let go
+	for (int t = 0; cur < seekTo && t < 2000;) { if (decodeNext()) cur++; else { svcSleepThread(1000000); t++; } }
+	u32 base = cur;
+	for (int t = 0; t < 120 && (vRead - vUsed < 45 && vNextFrame < hd.frames); t++) svcSleepThread(10000000);  // pre-buffer
 	u64 t0 = osGetTime(), pausedAt = 0;
 	if (paused) pausedAt = t0;
 	if (useAudio) { audioFeed(); ndspChnSetPaused(0, paused); }
-	bool dragging = false; float dragFrac = 0;
+	bool dragging = false; float dragFrac = 0; u32 scrubK = ~0u;
+#ifdef N3V_SCRUBTEST
+	static int scrubFr = 0;
+#endif
 
 	while (aptMainLoop()) {
-		hidScanInput(); ui_input(); u32 kd = hidKeysDown();
-		u32 target;
-		if (useAudio) {
+		hidScanInput();
+#ifdef N3V_SCRUBTEST
+		scrubFr++;
+		if (scrubFr >= 180 && scrubFr < 270) ui_fake(1, 40 + (scrubFr - 180) * 2.1f, 89);
+		else if (scrubFr >= 270 && scrubFr < 300) ui_fake(1, 230, 89);
+		else ui_fake(0, 0, 0);
+#endif
+		ui_input(); u32 kd = hidKeysDown();
+		bool wasDragging = dragging;
+		u32 target = cur;
+		if (dragging) { /* the reader is stopped; the picture follows the finger instead */ }
+		else if (useAudio) {
 			audioFeed();
 			bool any = false; for (int i = 0; i < NWB; i++) any |= wbQueued[i];
 			u64 pos = baseSample + played + (any ? ndspChnGetSamplePos(0) : 0);
@@ -248,8 +279,8 @@ restart:;
 		} else target = base + (u32)((paused ? pausedAt - t0 : osGetTime() - t0) * hd.fpsNum / (1000ull * hd.fpsDen));
 		if (target > hd.frames) target = hd.frames;
 		int budget = 6;
-		while (cur < target && budget-- > 0) { if (!decodeNext()) break; cur++; }
-		if (useAudio) audioFeed();
+		while (!dragging && cur < target && budget-- > 0) { if (!decodeNext()) break; cur++; }
+		if (useAudio && !dragging) audioFeed();
 		presentVideo();
 
 		// ---- the bottom screen: player controls
@@ -289,6 +320,15 @@ restart:;
 		ui_text(160, 222, 0.42f, C_MUTED, AL_CENTER, line);
 		ui_end();
 
+		if (dragging && !wasDragging) {                    // started dragging: stop reading, hush the sound
+			readerStop();
+			if (useAudio) ndspChnSetPaused(0, true);
+		}
+		if (dragging && ui_touchDown()) {                  // show the picture under the finger
+			u32 f = (u32)(dragFrac * (hd.frames - 1)), kk = (f + hd.keyInt / 2) / hd.keyInt;
+			if (kk >= hd.keyCount) kk = hd.keyCount - 1;
+			if (kk != scrubK) { showKeyframe(kk); scrubK = kk; }
+		}
 		if (dragging && !ui_touchDown()) {                 // let go of the bar: jump there
 			dragging = false;
 			seekTo = (u32)(dragFrac * (hd.frames - 1));
@@ -305,7 +345,6 @@ restart:;
 		s32 jump = ((kd & KEY_R) || tAhead || aF == 3 ? 10 : 0) - ((kd & KEY_L) || tBack || aF == 1 ? 10 : 0) + (kd & KEY_UP ? 60 : 0) - (kd & KEY_DOWN ? 60 : 0);
 		if (jump) {
 			s64 f = (s64)cur + (s64)jump * hd.fpsNum / hd.fpsDen;
-			if (jump < 0) f -= hd.keyInt / 2;               // back: land a little before
 			seekTo = f < 0 ? 0 : f >= hd.frames ? hd.frames - 1 : f;
 			goto restart;
 		}

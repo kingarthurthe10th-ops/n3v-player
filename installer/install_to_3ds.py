@@ -194,22 +194,21 @@ def remote_install(url, fixed_ip):
             time.sleep(2); continue
         set_state(state='found', ip=ip, method='Remote Install')
         print('\nFound FBI at %s. Press A on the 3DS to install.' % ip)
-        sock.settimeout(1.0); t_found = time.time()
+        sock.settimeout(1.0); t_found = time.time(); timedout = False
         while not DONE.is_set():
             try:
-                if sock.recv(1):                                    # FBI sends one byte when it has finished
-                    open(REMEMBER, 'w').write(ip); finish(True, ip); break
-                if S['state'] == 'downloading' and S['sent'] >= S['size']:
-                    open(REMEMBER, 'w').write(ip); finish(True, ip); break
-                sock.close(); sock = None; break                    # closed without a reply: cancelled on the 3DS
+                sock.recv(1)                                        # FBI replies (or hangs up) when it's finished,
+                if S['state'] == 'downloading' and S['sent'] >= S['size']:      # also when B cancelled it, so
+                    open(REMEMBER, 'w').write(ip); finish(True, ip); break      # only a full download counts
+                sock.close(); sock = None; break                    # cancelled on the 3DS: keep waiting
             except socket.timeout:
                 if S['state'] == 'found' and time.time() - t_found > 120:
-                    break                                           # nobody pressed A (or it wasn't FBI)
+                    timedout = True; break                                           # nobody pressed A (or it wasn't FBI)
             except OSError:
                 break
         if sock: sock.close()
         if not DONE.is_set():
-            if S['state'] == 'found' and not fixed_ip:
+            if timedout and not fixed_ip:
                 tried_bad.add(ip)                                   # never started downloading: skip it from now on
             set_state(state='waiting', sent=0, method=None, ip=None)
             print('\nThe device at %s didn\'t install it (cancelled, or not FBI). Still waiting...' % ip)

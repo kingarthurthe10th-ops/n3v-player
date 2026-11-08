@@ -13,11 +13,11 @@ There is no video codec on the 3DS side. The PC does the heavy work up front, an
 
 ## Install
 
-Download **`N3VPlayer.zip`** from the [latest release](../../releases/latest) and unzip it. Inside:
+From the [latest release](../../releases/latest), download:
 
-- `install_to_3ds.bat`: the easiest way. It opens a page with the steps and sends `N3VPlayer.cia` to FBI on your 3DS over Wi-Fi: scan the page's QR code with FBI's **Remote Install > Scan QR Code**, or pick **Remote Install > Receive URLs over the network** and it finds the 3DS by itself. When the install is done, the page closes and the result shows in the console. (Needs Python; `converter/setup.bat` installs it. Any .cia works: `python install_to_3ds.py other.cia`.)
-- `N3VPlayer.cia`: or install it with FBI yourself. Or copy `N3VPlayer.3dsx` to `sdmc:/3ds/` and open it from the Homebrew Launcher. You only need one of the two.
-- `converter/`: the video converter (see below).
+- **`USERS-PLEASE-INSTALL-N3VPlayer.zip`** (recommended): everything in one zip. Unzip it and run `install_to_3ds.bat`, which opens a page with the steps and sends N3V Player to FBI on your 3DS over Wi-Fi (QR code or automatic). It also has the video converter.
+- **`N3VPlayer.cia`**: just the app, to install with FBI yourself.
+- **`N3VPlayer.3dsx`**: just the app for the Homebrew Launcher (copy it to `sdmc:/3ds/`).
 
 Sound needs `sdmc:/3ds/dspfirm.cdc`, which most homebrew setups already have (dump it with DSP1 if not).
 

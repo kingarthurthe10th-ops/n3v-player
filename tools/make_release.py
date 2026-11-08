@@ -1,4 +1,4 @@
-# python tools/make_release.py 1.4.0  ->  dist/N3VPlayer.zip (CIA, 3DSX, converter, README.txt, LICENSE)
+# python tools/make_release.py 1.4.0  ->  dist/USERS-PLEASE-INSTALL-N3VPlayer.zip (CIA, 3DSX, converter, README.txt, LICENSE)
 import sys, zipfile
 v = sys.argv[1]
 txt = f"""N3V Player {v}
@@ -19,7 +19,7 @@ Make videos for it (Windows):
 Sound needs sdmc:/3ds/dspfirm.cdc (most homebrew setups already have it).
 More: https://github.com/kingarthurthe10th-ops/n3v-player
 """
-out = 'dist/N3VPlayer.zip'                     # the same name every release (Universal-Updater looks for it)
+out = 'dist/USERS-PLEASE-INSTALL-N3VPlayer.zip'     # same name every release; the .cia and .3dsx are uploaded beside it
 with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
     for src, dst in (('dist/N3VPlayer.cia', 'N3VPlayer.cia'), ('dist/N3VPlayer.3dsx', 'N3VPlayer.3dsx'),
                      ('installer/install_to_3ds.bat', 'install_to_3ds.bat'),

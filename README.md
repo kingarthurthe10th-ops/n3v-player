@@ -79,6 +79,8 @@ CTRTOOLS=/path/to/tools ./build.sh           # also dist/N3VPlayer.cia
 
 Described at the top of [`converter/n3vconvert.py`](converter/n3vconvert.py): a 64-byte header, the whole ADPCM soundtrack, the frames (each a length plus zlib data), then a table of keyframe offsets.
 
+To check a file for damage: `python tools/n3vcheck.py video.n3v` lists any broken header values, frames or keyframe entries.
+
 ## License
 
 MIT. Only convert videos you have the right to copy.

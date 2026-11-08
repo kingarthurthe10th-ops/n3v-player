@@ -43,6 +43,20 @@ static u8 *vring; static volatile u32 vw, vr, vRead, vUsed;      // video ring: 
 static u8 *aring; static u16 alen[AQ]; static volatile u32 aRead, aUsed; static u32 aLeft;
 static volatile bool running; static Thread rth;
 static u32 vNextFrame;
+static u32 fileSize, framesEnd;                 // framesEnd: where the frames stop (the keyframe table)
+static volatile bool vDamaged, vCorrupt;        // part skipped / nothing more can be read
+static u32 skipUntil;                           // frames before this are "no change" (skipped damage)
+#define MAX_CHUNK (256u * 1024)                  // no real frame comes close (a keyframe is ~49 KB before zlib)
+
+static bool keyOk(u32 k) {                      // does keyframe k's table entry point at a believable keyframe?
+	if (k >= hd.keyCount) return false;
+	u32 off = keys[k];
+	if (off < 64 + hd.audioBytes || off + 10 > framesEnd) return false;
+	u8 b[6];
+	if (fseek(fv, off, SEEK_SET) || fread(b, 1, 6, fv) != 6) return false;
+	u32 len = b[0] | b[1] << 8 | b[2] << 16 | (u32)b[3] << 24;
+	return len >= 8 && len <= MAX_CHUNK && off + 4 + len <= framesEnd && b[4] == 0x78 && ((b[4] << 8) | b[5]) % 31 == 0;
+}
 
 static void readerMain(void *arg) {
 	(void)arg; u32 pend = 0; bool hasPend = false;
@@ -57,14 +71,26 @@ static void readerMain(void *arg) {
 			did = true;
 		}
 		if (vNextFrame < hd.frames) {
-			if (!hasPend) { if (fread(&pend, 4, 1, fv) != 1) { vNextFrame = hd.frames; continue; } hasPend = true; }
+			if (!hasPend && vNextFrame < skipUntil) { pend = 0; hasPend = true; }          // a skipped (damaged) frame
+			if (!hasPend) {
+				long at0 = ftell(fv);
+				if (fread(&pend, 4, 1, fv) != 1) { vNextFrame = hd.frames; continue; }
+				if (pend > MAX_CHUNK || (u32)at0 + 4 + pend > framesEnd) {             // impossible length: damaged
+					u32 k = vNextFrame / hd.keyInt + 1;
+					while (k < hd.keyCount && !keyOk(k)) k++;
+					if (k >= hd.keyCount) { vCorrupt = true; vNextFrame = hd.frames; continue; }
+					fseek(fv, keys[k], SEEK_SET); skipUntil = k * hd.keyInt; vDamaged = true;
+					continue;
+				}
+				hasPend = true;
+			}
 			u32 need = 4 + pend, r = vr, at = vw; bool ok = false, wrap = false;
 			if (at >= r) { if (VRING - at >= need + 4) ok = true; else if (r > need) ok = wrap = true; }
 			else if (r - at > need) ok = true;
 			if (ok) {
 				if (wrap) { *(u32 *)(vring + at) = 0xFFFFFFFF; at = 0; }
 				*(u32 *)(vring + at) = pend;
-				if (pend) fread(vring + at + 4, 1, pend, fv);
+				if (pend && vNextFrame >= skipUntil) fread(vring + at + 4, 1, pend, fv);
 				__sync_synchronize(); vw = at + need; vRead++; vNextFrame++; hasPend = false; did = true;
 			}
 		}
@@ -79,7 +105,7 @@ static u32 readerStart(u32 k, u32 audioFrame) {
 	readerStop();
 	u32 frame = k * hd.keyInt;
 	fseek(fv, keys[k], SEEK_SET);
-	vw = vr = vRead = vUsed = 0; vNextFrame = frame;
+	vw = vr = vRead = vUsed = 0; vNextFrame = frame; skipUntil = 0; vCorrupt = false;
 	aRead = aUsed = 0; aLeft = 0;
 	if (hd.rate) {
 		u64 pk = (u64)audioFrame * hd.fpsDen * hd.rate / hd.fpsNum / 64;
@@ -219,6 +245,10 @@ static void messageBox(const char *title, const char *body) {
 		ui_text(26, 28, 0.55f, C_TEXT, AL_LEFT, body);
 		bool ok = ui_button(100, 182, 120, 42, NULL, "OK", true, IC_NONE);
 		ui_end();
+#ifdef N3V_AUTOTEST
+		{ static int fr; if (++fr == 2) { FILE *lf = fopen("sdmc:/n3v_play.log", "w"); if (lf) { fprintf(lf, "message: %s\n", title); fclose(lf); } }
+		  if (fr > 60) { fr = 0; break; } }
+#endif
 		if ((k & (KEY_A | KEY_B)) || ok) break;
 	}
 }
@@ -231,8 +261,23 @@ static int play(const char *path, const char *name) {      // 0 back to browser,
 		messageBox("Can't play this file", "It isn't a playable .n3v video, or it\nwas damaged while copying.\n\nMake it again with the N3V converter\non your PC.");
 		return 0;
 	}
+	fseek(fv, 0, SEEK_END); fileSize = ftell(fv);
+	bool sane = hd.fpsDen && hd.fpsNum / hd.fpsDen <= 120 && hd.keyInt && hd.keyInt <= 6000 &&
+	            hd.keyCount <= hd.frames / hd.keyInt + 2 && (!hd.rate || (hd.rate >= 4000 && hd.rate <= 48000)) &&
+	            (!hd.audioBytes || (hd.audioOff == 64 && hd.audioOff + hd.audioBytes <= fileSize)) &&
+	            hd.keyOff >= 64 + hd.audioBytes && hd.keyOff <= fileSize;
+	keys = sane ? calloc(hd.keyCount, 4) : NULL;
+	if (keys) { fseek(fv, hd.keyOff, SEEK_SET); fread(keys, 4, hd.keyCount, fv); }        // (a short table leaves zeros)
+	if (keys) keys[0] = 64 + hd.audioBytes;          // the first keyframe always sits right after the sound, list or no list
+	framesEnd = hd.keyOff; vDamaged = vCorrupt = false;
+	u32 k0 = 0;
+	if (keys) { while (k0 < hd.keyCount && !keyOk(k0)) k0++; }
+	if (!keys || k0 >= hd.keyCount) {
+		free(keys); keys = NULL; fclose(fv); fclose(fa);
+		messageBox("Can't play this file", "This .n3v video is damaged: its\nheader or keyframe list doesn't make\nsense.\n\nMake it again with the N3V converter\non your PC.");
+		return 0;
+	}
 	setvbuf(fv, NULL, _IOFBF, 64 * 1024); setvbuf(fa, NULL, _IOFBF, 32 * 1024);
-	keys = malloc(hd.keyCount * 4); fseek(fv, hd.keyOff, SEEK_SET); fread(keys, 4, hd.keyCount, fv);
 	bool useAudio = audioOk && hd.rate;
 	if (useAudio) { ndspChnReset(0); ndspChnSetInterp(0, NDSP_INTERP_LINEAR); ndspChnSetRate(0, hd.rate); ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
 		float mix[12] = {1, 1}; ndspChnSetMix(0, mix); }
@@ -246,6 +291,8 @@ static int play(const char *path, const char *name) {      // 0 back to browser,
 restart:;
 	if (seekTo >= hd.frames) seekTo = hd.frames - 1;
 	u32 k = seekTo / hd.keyInt; if (k >= hd.keyCount) k = hd.keyCount - 1;
+	while (k > 0 && !keyOk(k)) k--;
+	if (!keyOk(k)) { k = k0; if (seekTo < k0 * hd.keyInt) seekTo = k0 * hd.keyInt; }
 	u32 cur = readerStart(k, seekTo);
 	if (useAudio) audioReset();
 	u64 baseSample = (u64)seekTo * hd.fpsDen * hd.rate / hd.fpsNum / 64 * 64;
@@ -326,8 +373,9 @@ restart:;
 		static const char *plabel[4] = { "Stop", "-10 s", NULL, "+10 s" };
 		for (int i = 0; i < 4; i++)
 			ui_text(46 + i * 76, 206, 0.45f, pfocus == i ? C_TEXT : C_MUTED, AL_CENTER, plabel[i] ? plabel[i] : paused ? "Play" : "Pause");
-		snprintf(line, sizeof line, "%s", useAudio ? "Sound on" : "No sound");
-		ui_text(160, 222, 0.42f, C_MUTED, AL_CENTER, line);
+		if (vCorrupt && vUsed >= vRead) ui_text(160, 222, 0.42f, C_BAD, AL_CENTER, "This video is damaged from here on");
+		else if (vDamaged) ui_text(160, 222, 0.42f, C_BAD, AL_CENTER, "A damaged part of this video was skipped");
+		else { snprintf(line, sizeof line, "%s", useAudio ? "Sound on" : "No sound"); ui_text(160, 222, 0.42f, C_MUTED, AL_CENTER, line); }
 		ui_end();
 #ifdef N3V_SHOTS
 		{ static int pfr; if (++pfr == 200) ui_shot("3_player", pic); }
@@ -361,12 +409,16 @@ restart:;
 			seekTo = f < 0 ? 0 : f >= hd.frames ? hd.frames - 1 : f;
 			goto restart;
 		}
-		if (cur >= hd.frames) { done = true; break; }
+		if (cur >= hd.frames || (vCorrupt && vUsed >= vRead && target >= hd.frames)) { done = true; break; }
 	}
 	readerStop();
 	if (useAudio) audioReset();
 	free(keys); fclose(fv); fclose(fa);
 	if (done) svcSleepThread(400000000);
+#ifdef N3V_AUTOTEST
+	{ FILE *lf = fopen("sdmc:/n3v_play.log", "w");
+	  if (lf) { fprintf(lf, "played to frame %lu of %lu, finished %d, damaged-part-skipped %d, damaged-from-here %d\n", cur, hd.frames, done, vDamaged, vCorrupt); fclose(lf); } }
+#endif
 	videoMode(false);
 	return result;
 }

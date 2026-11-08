@@ -1,6 +1,6 @@
 # N3V Player
 
-![File list](screenshots/2_list.png) ![Player](screenshots/3_player.png) ![Download from PC](screenshots/4_download.png)
+![File list](screenshots/2_list.png) ![Player](screenshots/3_player.png) ![Download from PC](screenshots/4_download.png) ![Choose your PC](screenshots/5_choose_pc.png)
 
 A native video player for the Nintendo 3DS (old and New). Convert any video on your PC into an `.n3v` file, copy it to the SD card, and play it from a simple file browser.
 

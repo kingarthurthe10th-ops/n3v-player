@@ -184,6 +184,13 @@ bool ui_button(float x, float y, float w, float h, const char *glyph, const char
 	return ui_tapped(x, y, w, h);
 }
 
+void ui_buttonOff(float x, float y, float w, float h, const char *label, int ic) {
+	ui_round(x, y, w, h, 10, C_CARD);                     // solid colours only: overlapping see-through pieces look patchy
+	float cy = y + h / 2, lw = ui_textW(0.55f, label), iw = ic == IC_UP ? 20 : 0, tx = x + w / 2 - (lw + iw) / 2;
+	if (ic == IC_UP) icon_up(tx, cy - 8, 16, C_LINE);
+	ui_text(tx + iw, cy - 8, 0.55f, C_LINE, AL_LEFT, label);
+}
+
 // ---- preview picture
 static C3D_Tex thumb; static bool thumbOk; static C2D_Image thumbImg; static Tex3DS_SubTexture thumbSub;
 void ui_thumbClear(void) { if (thumbOk) { C3D_TexDelete(&thumb); thumbOk = false; } }

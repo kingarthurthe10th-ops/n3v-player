@@ -40,14 +40,14 @@ Copy the `.n3v` files anywhere on the SD card. The player starts in `sdmc:/video
 
 ## Controls
 
-The bottom screen has big buttons. **Left/Right** move the blue highlight between them and **A** presses it, or just tap them.
+The file list is on the **touch screen**: drag it with the stylus to scroll (flick it and it glides), tap a video to select it, and tap it again to play it. The top screen shows a big preview of the selected video. **Back** and **From PC** are in the bar at the top of the touch screen.
 
 | File list | |
 |---|---|
+| Stylus | scroll, select, tap again to play / open |
 | D-pad up/down | move through the list |
-| D-pad left/right | highlight **Play / Open**, **Back** or **From PC** |
-| A | press the highlighted button |
-| Tap the preview | play |
+| D-pad left/right | highlight the list, **Back** or **From PC** |
+| A | press the highlighted thing (play / open the selected item) |
 | B | up a folder |
 | START | quit |
 
@@ -55,14 +55,14 @@ The bottom screen has big buttons. **Left/Right** move the blue highlight betwee
 |---|---|
 | D-pad left/right | highlight **Stop**, **-10 s**, **Pause** or **+10 s** |
 | A | press the highlighted button |
-| Tap or drag the progress bar | jump there |
+| Tap or drag the progress bar | jump there (the picture follows while you drag) |
 | D-pad up/down | ahead / back 1 min |
 | L / R | back / ahead 10 s |
 | B | stop, back to the list |
 
 ## Send videos over Wi-Fi
 
-After converting, the converter asks **No / Yes, send it / I don't have N3V Player on my 3DS**. "Yes" opens a window showing your PC's address; on the 3DS choose **From PC**, type that address and the videos download into `sdmc:/videos/`. The last choice walks you through installing N3V Player first. You can also send any `.n3v` later with **Send to 3DS...**.
+After converting, the converter asks **No / Yes, send it / I don't have N3V Player on my 3DS**. "Yes" opens a window showing your PC's address; on the 3DS tap **From PC**, type that address (it's saved for next time, and later you just pick it from **Choose your PC**) and the videos download into `sdmc:/videos/`. The last choice walks you through installing N3V Player first. You can also send any `.n3v` later with **Send to 3DS...**.
 
 ## Build
 

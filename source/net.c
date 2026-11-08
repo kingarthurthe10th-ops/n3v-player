@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <malloc.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
@@ -345,77 +346,107 @@ static void icon_pc(float x, float y, float s, u32 c) {
 	ui_round(x + s * 0.25f, y + s * 0.84f, s * 0.5f, s * 0.1f, s * 0.05f, c);
 }
 
+// Choose your PC: the list on the touch screen (drag to scroll, tap to pick, tap again to connect), details on top.
+// The bar holds Back and Remove; Left/Right move the highlight between the list, Back and Remove; A presses it.
+#define PLY 36.0f
+#define PROW 34.0f
+#define PLH (240.0f - PLY)
 static bool pickAddress(char *out) {
 	loadPcs();
 	if (!nPcs) return typeAddress(out);              // the first time: just ask
-	int sel = 1, focus = 0;                          // row 0 is "Add new PC address"
-	float selY = 32;
+	int sel = 1, focus = 0;                          // row 0 is "Add new PC address"; focus 0 list, 1 Back, 2 Remove
+	float selY = PROW, scroll = 0, vel = 0; bool follow = true;
+	bool tDown = false, tInList = false, tMoved = false; float tStartY = 0, tLastY = 0;
 	while (aptMainLoop()) {
-		hidScanInput(); ui_input();
+		hidScanInput();
+#ifdef N3V_PICKTEST
+		{ static int pf; pf++;
+		  if (pf >= 50 && pf < 53) ui_fake(1, 160, PLY + 10);      // tap the "Add new PC address" row
+		  else ui_fake(0, 0, 0);
+		  if (pf == 40) ui_shot("5_choose_pc", NULL);
+		  if (pf == 80) ui_shot("6_add_pc", NULL);
+		  if (pf == 90) return false; }
+#endif
+		ui_input();
 		u32 kd = hidKeysDown() | (hidKeysDownRepeat() & (KEY_UP | KEY_DOWN));
 		int rows = nPcs + 1;
-		if (kd & KEY_DOWN) { sel = (sel + 1) % rows; focus = 0; }
-		if (kd & KEY_UP) { sel = (sel + rows - 1) % rows; focus = 0; }
-		int nBtn = sel ? 3 : 2;                         // Connect / Remove / Back, or Add / Back
-		if (kd & KEY_RIGHT) focus = (focus + 1) % nBtn;
-		if (kd & KEY_LEFT) focus = (focus + nBtn - 1) % nBtn;
-		selY += (sel * 32 - selY) * 0.4f;
+		if (kd & KEY_DOWN) { sel = (sel + 1) % rows; focus = 0; follow = true; }
+		if (kd & KEY_UP) { sel = (sel + rows - 1) % rows; focus = 0; follow = true; }
+		bool canRemove = sel > 0;
+		if (kd & KEY_RIGHT) { focus = (focus + 1) % 3; if (focus == 2 && !canRemove) focus = 0; }
+		if (kd & KEY_LEFT) { focus = (focus + 2) % 3; if (focus == 2 && !canRemove) focus = 1; }
+		if (focus == 2 && !canRemove) focus = 0;
+		// stylus
+		float maxScroll = rows * PROW > PLH ? rows * PROW - PLH : 0;
+		bool pickRow = false;
+		float tx = 0, ty = 0; bool down = ui_touchDown();
+		if (down) ui_touchPos(&tx, &ty);
+		if (down && !tDown) { tInList = ty >= PLY; tMoved = false; tStartY = tLastY = ty; vel = 0; }
+		else if (down && tInList) {
+			if (fabsf(ty - tStartY) > 6) tMoved = true;
+			if (tMoved) { float dy = ty - tLastY; scroll -= dy; vel = -dy; follow = false; }
+			tLastY = ty;
+		} else if (!down && tDown && tInList && !tMoved) {
+			int i = (int)((tStartY - PLY + scroll) / PROW);
+			if (i >= 0 && i < rows) { focus = 0; if (i == sel) pickRow = true; else sel = i; }
+		}
+		tDown = down;
+		if (!down) { if (fabsf(vel) > 0.2f) { scroll += vel; vel *= 0.94f; } else vel = 0; }
+		if (scroll < 0) { scroll = 0; vel = 0; }
+		if (scroll > maxScroll) { scroll = maxScroll; vel = 0; }
+		if (follow) {
+			float want = scroll;
+			if (sel * PROW < want) want = sel * PROW;
+			if ((sel + 1) * PROW > want + PLH) want = (sel + 1) * PROW - PLH;
+			scroll += (want - scroll) * 0.35f; if (fabsf(want - scroll) < 0.5f) scroll = want;
+		}
+		selY += (sel * PROW - selY) * 0.45f; if (fabsf(sel * PROW - selY) < 0.5f) selY = sel * PROW;
 
 		ui_begin();
-		ui_top();
+		ui_top();                                        // the selected one, large
 		ui_rect(0, 0, 400, 30, C_HEAD);
 		icon_download(10, 7, 16, C_ACCENT2);
 		ui_text(34, 6, 0.62f, C_TEXT, AL_LEFT, "Download from PC");
 		ui_text(392, 8, 0.5f, C_MUTED, AL_RIGHT, "Choose your PC");
-		ui_round(6, 40 + selY, 388, 30, 9, C_ACCENT);
-		for (int i = 0; i < rows; i++) {
-			float y = 40 + i * 32; bool s = i == sel;
-			if (!i) {
-				icon_pc(16, y + 6, 18, s ? C_TEXT : C_MUTED);
-				ui_text(44, y + 6, 0.58f, C_TEXT, AL_LEFT, "Add new PC address");
-			} else {
-				icon_pc(16, y + 6, 18, s ? C_TEXT : C_ACCENT2);
-				ui_text(44, y + 6, 0.58f, C_TEXT, AL_LEFT, pcs[i - 1]);
-				if (i == 1) ui_text(384, y + 8, 0.5f, s ? C_TEXT : C_MUTED, AL_RIGHT, "last used");
-			}
-		}
-		ui_bottom();
-		ui_round(12, 12, 296, 160, 12, C_CARD);
-		bool t0, t1, t2 = false;
+		icon_pc(160, 48, 80, sel ? C_ACCENT2 : C_MUTED);
 		if (!sel) {
-			ui_text(26, 24, 0.62f, C_ACCENT2, AL_LEFT, "Add a new PC");
-			ui_text(26, 54, 0.52f, C_TEXT, AL_LEFT, "Type the address shown in the\n\"Send to your 3DS\" window on the PC.\nIt's saved here for next time.");
-			t0 = ui_button(30, 190, 130, 42, NULL, "Add", focus == 0, IC_NONE);
-			t1 = ui_button(170, 190, 120, 42, NULL, "Back", focus == 1, IC_NONE);
+			ui_text(200, 142, 0.72f, C_TEXT, AL_CENTER, "Add new PC address");
+			ui_text(200, 172, 0.5f, C_MUTED, AL_CENTER, "Type the address shown in the \"Send to your 3DS\"\nwindow on the PC. It's saved here for next time.");
 		} else {
-			icon_pc(134, 26, 52, C_ACCENT2);
-			ui_text(160, 92, 0.72f, C_TEXT, AL_CENTER, pcs[sel - 1]);
-			ui_text(160, 124, 0.5f, C_MUTED, AL_CENTER, "Saved PC address");
-			t0 = ui_button(8, 190, 112, 42, NULL, "Connect", focus == 0, IC_DOWNLOAD);
-			t1 = ui_button(126, 190, 90, 42, NULL, "Remove", focus == 1, IC_NONE);
-			t2 = ui_button(222, 190, 90, 42, NULL, "Back", focus == 2, IC_NONE);
+			ui_text(200, 142, 0.8f, C_TEXT, AL_CENTER, pcs[sel - 1]);
+			ui_text(200, 176, 0.5f, C_MUTED, AL_CENTER, sel == 1 ? "Saved PC address  \xC2\xB7  last used" : "Saved PC address");
 		}
+		ui_bottom();                                     // the list
+		ui_round(4, PLY + selY - scroll + 1, 306, PROW - 2, 9, focus == 0 ? C_ACCENT : C_CARD2);
+		for (int i = 0; i < rows; i++) {
+			float y = PLY + i * PROW - scroll; bool s = i == sel && focus == 0;
+			if (y < PLY - PROW || y > 240) continue;
+			icon_pc(14, y + 8, 18, s ? C_TEXT : i ? C_ACCENT2 : C_MUTED);
+			ui_text(40, y + 8, 0.56f, C_TEXT, AL_LEFT, i ? pcs[i - 1] : "Add new PC address");
+			if (i == 1) ui_text(302, y + 10, 0.46f, s ? C_TEXT : C_MUTED, AL_RIGHT, "last used");
+		}
+		if (rows * PROW > PLH) {
+			float th = PLH * PLH / (rows * PROW), tyy = PLY + (PLH - th) * (scroll / (rows * PROW - PLH));
+			ui_round(314, PLY + 2, 3, PLH - 4, 1.5f, C_CARD); ui_round(314, tyy + 2, 3, th - 4, 1.5f, C_MUTED);
+		}
+		ui_rect(0, 0, 320, PLY - 2, C_HEAD);
+		bool tBack = ui_button(4, 4, 74, 26, NULL, "Back", focus == 1, IC_UP), tRem = false;
+		if (canRemove) tRem = ui_button(222, 4, 94, 26, NULL, "Remove", focus == 2, IC_NONE);
+		else ui_buttonOff(222, 4, 94, 26, "Remove", IC_NONE);
+		ui_textFit(150, 9, 0.48f, C_MUTED, AL_CENTER, 130, "Your PCs");
 		ui_end();
-#ifdef N3V_PICKTEST
-		{ static int fr; fr++;
-		  if (fr == 40) ui_shot("5_choose_pc", NULL);
-		  if (fr == 50) sel = 0;
-		  if (fr == 90) ui_shot("6_add_pc", NULL);
-		  if (fr == 100) return false; }
-#endif
 
 		bool a = kd & KEY_A;
-		int act = a ? focus : t0 ? 0 : t1 ? 1 : t2 ? 2 : -1;
-		if ((kd & KEY_B) || (!sel && act == 1) || (sel && act == 2)) return false;
-		if (act == 0) {
+		if ((kd & KEY_B) || tBack || (a && focus == 1)) return false;
+		if (pickRow || (a && focus == 0)) {
 			if (!sel) return typeAddress(out);
 			strcpy(out, pcs[sel - 1]); return true;
 		}
-		if (sel && act == 1) {                         // Remove
+		if (canRemove && (tRem || (a && focus == 2))) {
 			for (int i = sel - 1; i < nPcs - 1; i++) strcpy(pcs[i], pcs[i + 1]);
 			nPcs--; savePcs(); remove(IP_FILE);
 			if (sel > nPcs) sel = nPcs;
-			focus = 0;
+			focus = 0; follow = true;
 		}
 	}
 	return false;

@@ -489,42 +489,74 @@ out:
 	free(z); fclose(f);
 }
 
-static void drawList(const char *path, int sel, float scroll, float selY) {
-	const float ROW = 32, LY = 36;
-	if (!nEnts) {
-		ui_circle(200, 96, 34, C_CARD);
-		icon_download(184, 80, 32, C_ACCENT2);
-		ui_text(200, 142, 0.72f, C_TEXT, AL_CENTER, "No videos here yet");
-		ui_text(200, 170, 0.55f, C_MUTED, AL_CENTER, "Choose From PC below to get videos,");
-		ui_text(200, 188, 0.55f, C_MUTED, AL_CENTER, "or make them with the N3V converter (GitHub).");
-	} else {
-		ui_round(6, LY + selY - scroll, 382, ROW - 2, 9, C_ACCENT);
-		int first = (int)(scroll / ROW); if (first < 0) first = 0;
-		for (int i = first; i < nEnts && i < first + 8; i++) {
-			float y = LY + i * ROW - scroll;
-			Ent *e = &ents[i]; entInfo(path, e);
-			bool s = i == sel;
-			if (e->dir) icon_folder(16, y + 6, 18, s ? C_TEXT : C_FOLDER);
-			else icon_film(16, y + 6, 18, s ? C_TEXT : C_ACCENT2);
-			char right[48] = "";
-			if (!e->dir) {
-				char d[16] = "?", z[16]; if (e->dur >= 0) fmtTime(d, e->dur);
-				fmtSize(z, e->size); snprintf(right, sizeof right, "%s  \xC2\xB7  %s", d, z);
-			}
-			float rw = right[0] ? ui_text(380, y + 8, 0.5f, s ? C_TEXT : C_MUTED, AL_RIGHT, right) : 0;
-			ui_textFit(44, y + 6, 0.58f, C_TEXT, AL_LEFT, 380 - 44 - rw - 12, e->name);
-		}
-		if (nEnts > 6) {                                    // scroll bar
-			float th = 192.0f * 6 / nEnts, ty = LY + (192 - th) * (scroll / ((nEnts - 6) * ROW));
-			ui_round(393, LY, 4, 192, 2, C_CARD); ui_round(393, ty, 4, th, 2, C_MUTED);
-		}
-	}
-	ui_rect(0, 0, 400, 30, C_HEAD);                         // header on top of the scrolled rows
+// ---------- the browser: preview on the top screen, the file list on the touch screen
+#define LY 36.0f                 // the list starts below the bottom screen's bar
+#define LROW 34.0f
+#define LH (240.0f - LY)
+
+static void folderName(const char *path, char *out, size_t n) {
+	if (!strcmp(path, "sdmc:/")) { snprintf(out, n, "SD card"); return; }
+	char t[1024]; snprintf(t, sizeof t, "%s", path);
+	size_t l = strlen(t); if (l && t[l - 1] == '/') t[l - 1] = 0;
+	const char *s = strrchr(t, '/'); snprintf(out, n, "%s", s ? s + 1 : t);
+}
+
+static void drawPreview(const char *path, Ent *cur) {
+	ui_rect(0, 0, 400, 30, C_HEAD);
 	icon_film(10, 7, 17, C_ACCENT2);
 	ui_text(34, 6, 0.62f, C_TEXT, AL_LEFT, "N3V Player");
 	char shown[300]; snprintf(shown, sizeof shown, "SD card%s", path + 5);
 	if (strlen(shown) > 8 && shown[strlen(shown) - 1] == '/') shown[strlen(shown) - 1] = 0;
 	ui_textFit(392, 8, 0.5f, C_MUTED, AL_RIGHT, 230, shown);
+	if (!cur) {
+		ui_circle(200, 92, 34, C_CARD);
+		icon_download(184, 76, 32, C_ACCENT2);
+		ui_text(200, 138, 0.72f, C_TEXT, AL_CENTER, "No videos here yet");
+		ui_text(200, 166, 0.52f, C_MUTED, AL_CENTER, "On your PC, convert a video with the N3V\nconverter and choose \"Yes, send it\".\nThen tap From PC on the touch screen.");
+	} else if (cur->dir) {
+		icon_folder(160, 52, 80, C_FOLDER);
+		ui_textFit(200, 150, 0.72f, C_TEXT, AL_CENTER, 370, cur->name);
+		ui_text(200, 180, 0.5f, C_MUTED, AL_CENTER, "Folder");
+	} else {
+		ui_round(71, 36, 258, 158, 12, C_CARD);
+		if (!ui_thumbDraw(75, 40, 250, 150)) icon_film(170, 85, 60, C_CARD2);
+		else { ui_circle(200, 115, 24, UI_RGB(0, 0, 0) & 0x88FFFFFF); icon_play(191, 104, 22, C_TEXT); }
+		ui_textFit(200, 198, 0.6f, C_TEXT, AL_CENTER, 380, cur->name);
+		char d[16] = "?", z[16], info[96]; if (cur->dur >= 0) fmtTime(d, cur->dur);
+		fmtSize(z, cur->size); snprintf(info, sizeof info, "%s  \xC2\xB7  %s", d, z);
+		ui_text(200, 220, 0.47f, C_MUTED, AL_CENTER, info);
+	}
+}
+
+static void drawFiles(const char *path, int sel, float scroll, float selY, int focus, bool atRoot, bool *tB, bool *tY) {
+	if (!nEnts) {
+		ui_text(160, 104, 0.6f, C_TEXT, AL_CENTER, "No videos here yet");
+		ui_text(160, 132, 0.48f, C_MUTED, AL_CENTER, "Tap From PC to get videos from\nyour PC, or copy .n3v files here.");
+	} else {
+		ui_round(4, LY + selY - scroll + 1, 306, LROW - 2, 9, focus == 0 ? C_ACCENT : C_CARD2);
+		int first = (int)(scroll / LROW); if (first < 0) first = 0;
+		for (int i = first; i < nEnts && i < first + 8; i++) {
+			float y = LY + i * LROW - scroll;
+			Ent *e = &ents[i]; entInfo(path, e);
+			bool s = i == sel && focus == 0;
+			if (e->dir) icon_folder(14, y + 8, 18, s ? C_TEXT : C_FOLDER);
+			else icon_film(14, y + 8, 18, s ? C_TEXT : C_ACCENT2);
+			float rw = 0;
+			if (!e->dir && e->dur >= 0) { char d[16]; fmtTime(d, e->dur); rw = ui_text(302, y + 10, 0.48f, s ? C_TEXT : C_MUTED, AL_RIGHT, d); }
+			ui_textFit(40, y + 8, 0.56f, C_TEXT, AL_LEFT, 302 - 40 - rw - 10, e->name);
+		}
+		float total = nEnts * LROW;
+		if (total > LH) {                                   // scroll bar
+			float th = LH * LH / total, ty = LY + (LH - th) * (scroll / (total - LH));
+			ui_round(314, LY + 2, 3, LH - 4, 1.5f, C_CARD); ui_round(314, ty + 2, 3, th - 4, 1.5f, C_MUTED);
+		}
+	}
+	ui_rect(0, 0, 320, LY - 2, C_HEAD);                    // the bar sits over rows scrolled under it
+	if (atRoot) { ui_buttonOff(4, 4, 74, 26, "Back", IC_UP); *tB = false; }      // nothing to go back to
+	else *tB = ui_button(4, 4, 74, 26, NULL, "Back", focus == 1, IC_UP);
+	*tY = ui_button(212, 4, 104, 26, NULL, "From PC", focus == 2, IC_DOWNLOAD);
+	char fn[64]; folderName(path, fn, sizeof fn);
+	ui_textFit(145, 9, 0.48f, C_MUTED, AL_CENTER, 120, fn);
 }
 
 // first launch: where to get the converter (with a QR code for the phone)
@@ -587,9 +619,10 @@ int main(void) {
 	char path[1024] = "sdmc:/";
 	{ struct stat st; if (!stat("sdmc:/videos", &st) && S_ISDIR(st.st_mode)) strcpy(path, "sdmc:/videos/"); }
 	hidSetRepeatParameters(18, 4); converterNotice(false); listDir(path);
-	int focus = 0;                                      // highlighted bottom button: 0 Play/Open, 1 Back, 2 From PC
-	int sel = 0, thumbFor = -2; float scroll = 0, selY = 0; u64 selChanged = 0;
-	const int ROWS = 6; const float ROW = 32;
+	int focus = 0;                                      // highlight: 0 the list, 1 Back, 2 From PC
+	int sel = 0, thumbFor = -2; float scroll = 0, selY = 0, vel = 0; u64 selChanged = 0;
+	bool follow = true;                                 // keep the selection in view (after D-pad moves)
+	bool tDown = false, tInList = false, tMoved = false; float tStartY = 0, tLastY = 0;
 #ifdef N3V_AUTOTEST
 	for (int i = 0; i < nEnts; i++) if (!ents[i].dir) { sel = i; break; }
 	int autoKeys = 200;
@@ -598,7 +631,20 @@ int main(void) {
 	int autoNet = 90;
 #endif
 	while (aptMainLoop()) {
-		hidScanInput(); ui_input();
+		hidScanInput();
+#ifdef N3V_LISTTEST                                  // flicks the list, lets it glide, taps a row, taps it again
+		{ static int lf; lf++;
+		  if (lf >= 10 && lf < 13) ui_fake(1, 40, 17);                      // tap Back: up to the SD card
+		  else if (lf >= 60 && lf < 70) ui_fake(1, 160, 228 - (lf - 60) * 16);
+		  else if (lf >= 150 && lf < 153) ui_fake(1, 160, 120);
+		  else if (lf >= 190 && lf < 193) ui_fake(1, 160, 120);
+		  else ui_fake(0, 0, 0);
+		  if (lf == 40) ui_shot("7_list_start", NULL);
+		  if (lf == 74) ui_shot("8_list_gliding", NULL);
+		  if (lf == 140) ui_shot("9_list_scrolled", NULL);
+		  if (lf == 180) ui_shot("10_list_tapped", NULL); }
+#endif
+		ui_input();
 		u32 kd = hidKeysDown() | (hidKeysDownRepeat() & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT));
 #ifdef N3V_AUTOTEST
 		if (autoKeys > 0 && --autoKeys == 0) kd |= KEY_A;
@@ -608,19 +654,38 @@ int main(void) {
 #endif
 		int oldSel = sel;
 		if (nEnts) {
-			if (kd & KEY_DOWN) sel = (sel + 1) % nEnts;
-			if (kd & KEY_UP) sel = (sel + nEnts - 1) % nEnts;
+			if (kd & KEY_DOWN) { sel = (sel + 1) % nEnts; follow = true; focus = 0; }
+			if (kd & KEY_UP) { sel = (sel + nEnts - 1) % nEnts; follow = true; focus = 0; }
 		}
+		// stylus: drag the list to scroll (it glides on when flicked), tap a row to select it, tap it again to open
+		float maxScroll = nEnts * LROW > LH ? nEnts * LROW - LH : 0;
+		bool openSel = false;
+		float tx = 0, ty = 0; bool down = ui_touchDown();
+		if (down) ui_touchPos(&tx, &ty);
+		if (down && !tDown) { tInList = ty >= LY; tMoved = false; tStartY = tLastY = ty; vel = 0; }
+		else if (down && tInList) {
+			if (fabsf(ty - tStartY) > 6) tMoved = true;
+			if (tMoved) { float dy = ty - tLastY; scroll -= dy; vel = -dy; follow = false; }
+			tLastY = ty;
+		} else if (!down && tDown && tInList && !tMoved) {
+			int i = (int)((tStartY - LY + scroll) / LROW);
+			if (i >= 0 && i < nEnts) { focus = 0; if (i == sel) openSel = true; else sel = i; }
+		}
+		tDown = down;
+		if (!down) { if (fabsf(vel) > 0.2f) { scroll += vel; vel *= 0.94f; } else vel = 0; }
+		if (scroll < 0) { scroll = 0; vel = 0; }
+		if (scroll > maxScroll) { scroll = maxScroll; vel = 0; }
 		if (sel != oldSel) selChanged = osGetTime();
-		// smooth scrolling and highlight
-		float wantScroll = scroll;
-		if (sel * ROW < wantScroll) wantScroll = sel * ROW;
-		if ((sel + 1) * ROW > wantScroll + ROWS * ROW) wantScroll = (sel + 1) * ROW - ROWS * ROW;
-		scroll += (wantScroll - scroll) * 0.35f; selY += (sel * ROW - selY) * 0.4f;
-		if (fabsf(wantScroll - scroll) < 0.5f) scroll = wantScroll;
-		if (fabsf(sel * ROW - selY) < 0.5f) selY = sel * ROW;
+		if (follow) {
+			float want = scroll;
+			if (sel * LROW < want) want = sel * LROW;
+			if ((sel + 1) * LROW > want + LH) want = (sel + 1) * LROW - LH;
+			scroll += (want - scroll) * 0.35f; if (fabsf(want - scroll) < 0.5f) scroll = want;
+		}
+		selY += (sel * LROW - selY) * 0.45f; if (fabsf(sel * LROW - selY) < 0.5f) selY = sel * LROW;
 		// preview picture, once the selection has rested a moment
 		Ent *cur = nEnts ? &ents[sel] : NULL;
+		if (cur) entInfo(path, cur);
 		if (cur && !cur->dir && thumbFor != sel && osGetTime() - selChanged > 180) {
 			char full[1300]; snprintf(full, sizeof full, "%s%s", path, cur->name); loadThumb(full); thumbFor = sel;
 		}
@@ -631,52 +696,26 @@ int main(void) {
 		if (kd & KEY_RIGHT) for (int t = 0; t < 3; t++) { focus = (focus + 1) % 3; if (avail[focus]) break; }
 		if (kd & KEY_LEFT) for (int t = 0; t < 3; t++) { focus = (focus + 2) % 3; if (avail[focus]) break; }
 		if (!avail[focus]) focus = avail[0] ? 0 : 2;
+		bool tB = false, tY = false;
 		ui_begin();
-		ui_top(); drawList(path, sel, scroll, selY);
-		ui_bottom();
-		bool tA = false, tB = false, tY = false, tPic = false;
-		if (!cur) {
-			ui_round(12, 12, 296, 160, 12, C_CARD);
-			ui_text(26, 22, 0.62f, C_ACCENT2, AL_LEFT, "Get videos onto your 3DS");
-			ui_text(26, 52, 0.52f, C_TEXT, AL_LEFT, "1.  On your PC, open the N3V converter\n     and convert a video.\n2.  Choose \"Yes, send it\".\n3.  Choose From PC below and type the\n     address your PC shows.");
-		} else if (cur->dir) {
-			ui_round(12, 12, 296, 160, 12, C_CARD);
-			icon_folder(128, 34, 64, C_FOLDER);
-			ui_textFit(160, 112, 0.66f, C_TEXT, AL_CENTER, 270, cur->name);
-			ui_text(160, 140, 0.5f, C_MUTED, AL_CENTER, "Folder");
-			tPic = ui_tapped(12, 12, 296, 160);
-		} else {
-			entInfo(path, cur);
-			ui_round(56, 8, 208, 128, 10, C_CARD);
-			if (!ui_thumbDraw(60, 12, 200, 120)) icon_film(130, 42, 60, C_CARD2);
-			else { ui_circle(160, 72, 20, UI_RGB(0, 0, 0) & 0x88FFFFFF); icon_play(152, 63, 18, C_TEXT); }
-			tPic = ui_tapped(56, 8, 208, 128);
-			ui_textFit(160, 140, 0.6f, C_TEXT, AL_CENTER, 296, cur->name);
-			char d[16] = "?", z[16], info[64]; if (cur->dur >= 0) fmtTime(d, cur->dur);
-			fmtSize(z, cur->size); snprintf(info, sizeof info, "%s  \xC2\xB7  %s", d, z);
-			ui_text(160, 162, 0.5f, C_MUTED, AL_CENTER, info);
-		}
-		if (cur) tA = ui_button(8, 190, 100, 42, NULL, cur->dir ? "Open" : "Play", focus == 0, cur->dir ? IC_FOLDER : IC_PLAY);
-		tB = ui_button(114, 190, 90, 42, NULL, "Back", focus == 1, IC_UP);
-		if (atRoot) ui_round(114, 190, 90, 42, 10, C_BG & 0x99FFFFFF);       // nothing to go back to
-		tY = ui_button(210, 190, 102, 42, NULL, "From PC", focus == 2, IC_DOWNLOAD);
-		ui_text(312, 176, 0.42f, C_MUTED, AL_RIGHT, "START: quit");
+		ui_top(); drawPreview(path, cur);
+		ui_bottom(); drawFiles(path, sel, scroll, selY, focus, atRoot, &tB, &tY);
 		ui_end();
 #ifdef N3V_SHOTS
 		{ static int bfr; if (++bfr == 120) ui_shot("2_list", NULL); }
 #endif
 
 		if (kd & KEY_START) break;
-		bool aOn = kd & KEY_A;                             // A presses the highlighted button
-		if (((aOn && focus == 0) || tA || tPic) && cur) {
+		bool aOn = kd & KEY_A;                             // A presses the highlighted thing
+		if (((aOn && focus == 0) || openSel) && cur) {
 			char full[1300]; snprintf(full, sizeof full, "%s%s", path, cur->name);
 			if (cur->dir) {
-				if (strlen(full) < 1000) { snprintf(path, sizeof path, "%s/", full); listDir(path); sel = 0; scroll = selY = 0; thumbFor = -2; selChanged = osGetTime(); }
+				if (strlen(full) < 1000) { snprintf(path, sizeof path, "%s/", full); listDir(path); sel = 0; scroll = selY = vel = 0; follow = true; thumbFor = -2; selChanged = osGetTime(); }
 			} else if (play(full, cur->name)) break;
 		}
 		if (((kd & KEY_B) || tB || (aOn && focus == 1)) && !atRoot) {
 			char *s = path + strlen(path) - 1; *s = 0; s = strrchr(path, '/'); s[1] = 0;
-			listDir(path); sel = 0; scroll = selY = 0; thumbFor = -2; selChanged = osGetTime();
+			listDir(path); sel = 0; scroll = selY = vel = 0; follow = true; thumbFor = -2; selChanged = osGetTime(); focus = 0;
 		}
 		if ((kd & KEY_Y) || tY || (aOn && focus == 2)) {    // download from PC
 			char got[300];
@@ -684,7 +723,7 @@ int main(void) {
 				strcpy(path, DEST_DIR); listDir(path); sel = 0;
 				const char *nm = strrchr(got, '/') ? strrchr(got, '/') + 1 : got;
 				for (int i = 0; i < nEnts; i++) if (!strcmp(ents[i].name, nm)) { sel = i; break; }
-				scroll = selY = sel * ROW; thumbFor = -2; selChanged = 0;
+				selY = sel * LROW; vel = 0; follow = true; thumbFor = -2; selChanged = 0; focus = 0;
 			}
 		}
 	}

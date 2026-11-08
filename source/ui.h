@@ -66,6 +66,7 @@ void icon_up(float x, float y, float s, u32 c);
 
 // a touch button: draws it and returns true when it was tapped (released inside) this frame
 bool ui_button(float x, float y, float w, float h, const char *glyph, const char *label, bool primary, int iconKind);
+void ui_buttonOff(float x, float y, float w, float h, const char *label, int iconKind);   // greyed out, can't be pressed
 enum { IC_NONE, IC_PLAY, IC_PAUSE, IC_BACK10, IC_AHEAD10, IC_STOP, IC_DOWNLOAD, IC_UP, IC_FOLDER };
 
 void ui_input(void);            // call once per frame after hidScanInput()

@@ -13,6 +13,9 @@
 #include <math.h>
 #include "net.h"
 #include "ui.h"
+#ifdef N3V_VERIFY                          // saves the picture just before each keyframe (sdmc:/n3v_verify)
+#define N3V_AUTOTEST
+#endif
 #ifdef N3V_SCRUBTEST                      // drags the bar by itself: 40 -> 230 px, lets go at the 15 s mark
 #define N3V_AUTOTEST
 #endif
@@ -281,6 +284,13 @@ restart:;
 		int budget = 6;
 		while (!dragging && cur < target && budget-- > 0) { if (!decodeNext()) break; cur++; }
 		if (useAudio && !dragging) audioFeed();
+#ifdef N3V_VERIFY
+		{ static u32 last = ~0u; static int n;
+		  if (n < 8 && cur != last && cur % hd.keyInt == hd.keyInt - 1) {
+			last = cur; n++; mkdir("sdmc:/n3v_verify", 0777);
+			char vp[64]; snprintf(vp, sizeof vp, "sdmc:/n3v_verify/f%05lu.raw", cur - 1);    // cur frames shown = frame cur-1
+			FILE *vf = fopen(vp, "wb"); if (vf) { fwrite(pic, 2, W * H, vf); fclose(vf); } } }
+#endif
 		presentVideo();
 
 		// ---- the bottom screen: player controls
@@ -532,7 +542,7 @@ int main(void) {
 	for (int i = 0; i < nEnts; i++) if (!ents[i].dir) { sel = i; break; }
 	int autoKeys = 200;
 #endif
-#ifdef N3V_NETTEST
+#if defined(N3V_NETTEST) || defined(N3V_PICKTEST)
 	int autoNet = 90;
 #endif
 	while (aptMainLoop()) {
@@ -541,7 +551,7 @@ int main(void) {
 #ifdef N3V_AUTOTEST
 		if (autoKeys > 0 && --autoKeys == 0) kd |= KEY_A;
 #endif
-#ifdef N3V_NETTEST
+#if defined(N3V_NETTEST) || defined(N3V_PICKTEST)
 		if (autoNet > 0 && --autoNet == 0) kd |= KEY_Y;
 #endif
 		int oldSel = sel;

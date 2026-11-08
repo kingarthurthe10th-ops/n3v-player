@@ -126,7 +126,7 @@ static bool netDraw(void) {
 	return tapped;
 }
 
-static u64 lastDraw;
+static u64 lastDraw, tStart;
 static void redraw(bool force) {
 	if (!force && osGetTime() - lastDraw < 40) return;
 	lastDraw = osGetTime(); netDraw();
@@ -144,16 +144,50 @@ static bool cancelPressed(void) {                // B, or Cancel tapped
 // ---------- HTTP
 static int lastErr;
 
-// A plain blocking connect: the non-blocking connect + poll + SO_ERROR check worked in Azahar but reported
-// failure on a real 3DS even though the PC had accepted the connection. Only reads/writes are non-blocking.
-static int connectTo(u32 addr, u16 port) {
+// Connecting: a plain blocking connect (the non-blocking connect + poll + SO_ERROR check reported failure on a
+// real 3DS even though the PC had accepted). But when nothing listens, Windows Firewall ignores the request and a
+// blocking connect waits a minute or more - the app froze. So the blocking connect runs in its own thread while
+// the screen keeps drawing; after 6 s (or Cancel) we give up and leave the thread to finish and clean up alone.
+typedef struct { LightLock lock; u32 addr; u16 port; int state, sock, err; bool abandoned; } ConnJob;   // state 0 waiting, 1 ok, 2 failed
+
+static void connThread(void *arg) {
+	ConnJob *j = arg; int err = 0;
 	int s = socket(AF_INET, SOCK_STREAM, 0);
-	if (s < 0) { lastErr = errno; return E_CONNECT; }
-	struct sockaddr_in sa; memset(&sa, 0, sizeof sa);
-	sa.sin_family = AF_INET; sa.sin_port = htons(port); sa.sin_addr.s_addr = addr;
-	if (connect(s, (struct sockaddr *)&sa, sizeof sa) < 0) { lastErr = errno; close(s); return E_CONNECT; }
-	fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
-	return s;
+	if (s < 0) err = errno;
+	else {
+		struct sockaddr_in sa; memset(&sa, 0, sizeof sa);
+		sa.sin_family = AF_INET; sa.sin_port = htons(j->port); sa.sin_addr.s_addr = j->addr;
+		if (connect(s, (struct sockaddr *)&sa, sizeof sa) < 0) { err = errno ? errno : -1; close(s); s = -1; }
+	}
+	LightLock_Lock(&j->lock);
+	if (j->abandoned) {                              // nobody is waiting any more: tidy up and go
+		LightLock_Unlock(&j->lock);
+		if (s >= 0) close(s);
+		free(j); return;
+	}
+	j->sock = s; j->err = err; j->state = s >= 0 ? 1 : 2;
+	LightLock_Unlock(&j->lock);
+}
+
+static int connectTo(u32 addr, u16 port) {
+	ConnJob *j = calloc(1, sizeof *j);
+	if (!j) { lastErr = ENOMEM; return E_CONNECT; }
+	LightLock_Init(&j->lock); j->addr = addr; j->port = port;
+	s32 prio = 0x30; svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+	if (!threadCreate(connThread, j, 16 * 1024, prio + 1, -2, true)) { free(j); lastErr = EAGAIN; return E_CONNECT; }
+	u64 t0 = osGetTime();
+	while (1) {
+		bool cancel = cancelPressed(), late = osGetTime() - t0 > 6000;
+		LightLock_Lock(&j->lock);
+		int st = j->state, s = j->sock, err = j->err;
+		if (!st && (cancel || late)) j->abandoned = true;
+		LightLock_Unlock(&j->lock);
+		if (st == 1) { free(j); fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK); return s; }
+		if (st == 2) { free(j); lastErr = err; return E_CONNECT; }
+		if (cancel) return E_CANCEL;                  // (the thread frees j)
+		if (late) { lastErr = ETIMEDOUT; return E_CONNECT; }
+		redraw(false); svcSleepThread(20000000);
+	}
 }
 
 static int sendAll(int s, const char *b, int n) {
@@ -237,7 +271,9 @@ static void cleanName(char *s) {
 
 static void errText(int e, char *out) {
 	switch (e) {
-	case E_CONNECT: sprintf(out, "Couldn't reach your PC (error %d).\nCheck that the 3DS's Wi-Fi is on, the\naddress is right, and the \"Send to your\n3DS\" window is open on the PC.", lastErr); break;
+	case E_CONNECT:
+		if (lastErr == ETIMEDOUT) { strcpy(out, "Your PC didn't answer. Is the \"Send to\nyour 3DS\" window open on it, and is this\nthe address it shows? Both need the\nsame Wi-Fi."); break; }
+		sprintf(out, "Couldn't reach your PC (error %d).\nCheck that the 3DS's Wi-Fi is on, the\naddress is right, and the \"Send to your\n3DS\" window is open on the PC.", lastErr); break;
 	case E_CANCEL: strcpy(out, "You cancelled it."); break;
 	case E_HTTP: strcpy(out, "The PC answered, but not like the N3V\nconverter. Is the address right?"); break;
 	case E_WRITE: strcpy(out, "Couldn't save to the SD card.\nIs it full?"); break;
@@ -248,7 +284,7 @@ static void errText(int e, char *out) {
 static void finish(void) {                       // show the result until A / OK
 #ifdef N3V_NETTEST
 	FILE *f = fopen("sdmc:/n3v_net.log", "w");
-	if (f) { fprintf(f, "downloaded %d of %d err %d\n", N.ok, N.nf, N.err); fclose(f); }
+	if (f) { fprintf(f, "downloaded %d of %d err %d lastErr %d after %lu ms\n", N.ok, N.nf, N.err, lastErr, (u32)(osGetTime() - tStart)); fclose(f); }
 	for (int i = 0; i < 90; i++) netDraw();
 	return;
 #endif
@@ -259,22 +295,139 @@ static void finish(void) {                       // show the result until A / OK
 	}
 }
 
-bool net_download(char *first, size_t firstLen) {
-	memset(&N, 0, sizeof N); first[0] = 0;
-	FILE *f = fopen(IP_FILE, "r");
-	if (f) { if (fgets(N.addr, sizeof N.addr, f)) N.addr[strcspn(N.addr, "\r\n")] = 0; fclose(f); }
-#ifdef N3V_NETTEST
-	f = fopen("sdmc:/n3v_autoip.txt", "r");
-	if (f) { if (fgets(N.addr, sizeof N.addr, f)) N.addr[strcspn(N.addr, "\r\n")] = 0; fclose(f); }
-#else
+// ---------- saved PCs: the first time you type an address; after that you pick one (or "Add new PC address")
+#define PCS_FILE CFG_DIR "/pcs.txt"
+#define MAXPC 8
+static char pcs[MAXPC][32]; static int nPcs;
+
+static void loadPcs(void) {
+	nPcs = 0;
+	FILE *f = fopen(PCS_FILE, "r");
+	if (!f) f = fopen(IP_FILE, "r");                 // (1.3 kept just the last address)
+	if (!f) return;
+	char line[64];
+	while (nPcs < MAXPC && fgets(line, sizeof line, f)) {
+		line[strcspn(line, "\r\n")] = 0;
+		if (line[0]) { strncpy(pcs[nPcs], line, 31); pcs[nPcs][31] = 0; nPcs++; }
+	}
+	fclose(f);
+}
+
+static void savePcs(void) {
+	mkdir("sdmc:/3ds", 0777); mkdir(CFG_DIR, 0777);
+	FILE *f = fopen(PCS_FILE, "w"); if (!f) return;
+	for (int i = 0; i < nPcs; i++) fprintf(f, "%s\n", pcs[i]);
+	fclose(f);
+}
+
+static void rememberPc(const char *a) {           // move (or add) it to the top of the list
+	loadPcs();
+	char keep[MAXPC][32]; int n = 0;
+	strncpy(keep[n++], a, 31); keep[0][31] = 0;
+	for (int i = 0; i < nPcs && n < MAXPC; i++) if (strcmp(pcs[i], a)) strcpy(keep[n++], pcs[i]);
+	memcpy(pcs, keep, sizeof keep); nPcs = n; savePcs();
+}
+
+static bool typeAddress(char *out) {
 	SwkbdState kb; char typed[32];
 	swkbdInit(&kb, SWKBD_TYPE_NUMPAD, 2, 21);
 	swkbdSetNumpadKeys(&kb, '.', ':');
 	swkbdSetHintText(&kb, "PC address, e.g. 192.168.1.71");
-	swkbdSetInitialText(&kb, N.addr);
 	swkbdSetValidation(&kb, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
 	if (swkbdInputText(&kb, typed, sizeof typed) != SWKBD_BUTTON_CONFIRM) return false;
-	strcpy(N.addr, typed);
+	strcpy(out, typed); return true;
+}
+
+static void icon_pc(float x, float y, float s, u32 c) {
+	ui_round(x, y + s * 0.08f, s, s * 0.62f, s * 0.1f, c);
+	ui_rect(x + s * 0.08f, y + s * 0.16f, s * 0.84f, s * 0.46f, C_BG);
+	ui_rect(x + s * 0.42f, y + s * 0.7f, s * 0.16f, s * 0.14f, c);
+	ui_round(x + s * 0.25f, y + s * 0.84f, s * 0.5f, s * 0.1f, s * 0.05f, c);
+}
+
+static bool pickAddress(char *out) {
+	loadPcs();
+	if (!nPcs) return typeAddress(out);              // the first time: just ask
+	int sel = 1, focus = 0;                          // row 0 is "Add new PC address"
+	float selY = 32;
+	while (aptMainLoop()) {
+		hidScanInput(); ui_input();
+		u32 kd = hidKeysDown() | (hidKeysDownRepeat() & (KEY_UP | KEY_DOWN));
+		int rows = nPcs + 1;
+		if (kd & KEY_DOWN) { sel = (sel + 1) % rows; focus = 0; }
+		if (kd & KEY_UP) { sel = (sel + rows - 1) % rows; focus = 0; }
+		int nBtn = sel ? 3 : 2;                         // Connect / Remove / Back, or Add / Back
+		if (kd & KEY_RIGHT) focus = (focus + 1) % nBtn;
+		if (kd & KEY_LEFT) focus = (focus + nBtn - 1) % nBtn;
+		selY += (sel * 32 - selY) * 0.4f;
+
+		ui_begin();
+		ui_top();
+		ui_rect(0, 0, 400, 30, C_HEAD);
+		icon_download(10, 7, 16, C_ACCENT2);
+		ui_text(34, 6, 0.62f, C_TEXT, AL_LEFT, "Download from PC");
+		ui_text(392, 8, 0.5f, C_MUTED, AL_RIGHT, "Choose your PC");
+		ui_round(6, 40 + selY, 388, 30, 9, C_ACCENT);
+		for (int i = 0; i < rows; i++) {
+			float y = 40 + i * 32; bool s = i == sel;
+			if (!i) {
+				icon_pc(16, y + 6, 18, s ? C_TEXT : C_MUTED);
+				ui_text(44, y + 6, 0.58f, C_TEXT, AL_LEFT, "Add new PC address");
+			} else {
+				icon_pc(16, y + 6, 18, s ? C_TEXT : C_ACCENT2);
+				ui_text(44, y + 6, 0.58f, C_TEXT, AL_LEFT, pcs[i - 1]);
+				if (i == 1) ui_text(384, y + 8, 0.5f, s ? C_TEXT : C_MUTED, AL_RIGHT, "last used");
+			}
+		}
+		ui_bottom();
+		ui_round(12, 12, 296, 160, 12, C_CARD);
+		bool t0, t1, t2 = false;
+		if (!sel) {
+			ui_text(26, 24, 0.62f, C_ACCENT2, AL_LEFT, "Add a new PC");
+			ui_text(26, 54, 0.52f, C_TEXT, AL_LEFT, "Type the address shown in the\n\"Send to your 3DS\" window on the PC.\nIt's saved here for next time.");
+			t0 = ui_button(30, 190, 130, 42, NULL, "Add", focus == 0, IC_NONE);
+			t1 = ui_button(170, 190, 120, 42, NULL, "Back", focus == 1, IC_NONE);
+		} else {
+			icon_pc(134, 26, 52, C_ACCENT2);
+			ui_text(160, 92, 0.72f, C_TEXT, AL_CENTER, pcs[sel - 1]);
+			ui_text(160, 124, 0.5f, C_MUTED, AL_CENTER, "Saved PC address");
+			t0 = ui_button(8, 190, 112, 42, NULL, "Connect", focus == 0, IC_DOWNLOAD);
+			t1 = ui_button(126, 190, 90, 42, NULL, "Remove", focus == 1, IC_NONE);
+			t2 = ui_button(222, 190, 90, 42, NULL, "Back", focus == 2, IC_NONE);
+		}
+		ui_end();
+#ifdef N3V_PICKTEST
+		{ static int fr; fr++;
+		  if (fr == 40) ui_shot("5_choose_pc", NULL);
+		  if (fr == 50) sel = 0;
+		  if (fr == 90) ui_shot("6_add_pc", NULL);
+		  if (fr == 100) return false; }
+#endif
+
+		bool a = kd & KEY_A;
+		int act = a ? focus : t0 ? 0 : t1 ? 1 : t2 ? 2 : -1;
+		if ((kd & KEY_B) || (!sel && act == 1) || (sel && act == 2)) return false;
+		if (act == 0) {
+			if (!sel) return typeAddress(out);
+			strcpy(out, pcs[sel - 1]); return true;
+		}
+		if (sel && act == 1) {                         // Remove
+			for (int i = sel - 1; i < nPcs - 1; i++) strcpy(pcs[i], pcs[i + 1]);
+			nPcs--; savePcs(); remove(IP_FILE);
+			if (sel > nPcs) sel = nPcs;
+			focus = 0;
+		}
+	}
+	return false;
+}
+
+bool net_download(char *first, size_t firstLen) {
+	memset(&N, 0, sizeof N); first[0] = 0;
+#ifdef N3V_NETTEST
+	FILE *f = fopen("sdmc:/n3v_autoip.txt", "r");
+	if (f) { if (fgets(N.addr, sizeof N.addr, f)) N.addr[strcspn(N.addr, "\r\n")] = 0; fclose(f); }
+#else
+	if (!pickAddress(N.addr)) return false;
 #endif
 	u32 addr; u16 port;
 	if (!parseAddr(N.addr, &addr, &port)) {
@@ -282,9 +435,8 @@ bool net_download(char *first, size_t firstLen) {
 		snprintf(N.msg, sizeof N.msg, "\"%.24s\" isn't an address like\n192.168.1.71 (or 192.168.1.71:8691).\nType it exactly as your PC shows it.", N.addr);
 		finish(); return false;
 	}
-	mkdir("sdmc:/3ds", 0777); mkdir(CFG_DIR, 0777);
-	if ((f = fopen(IP_FILE, "w"))) { fputs(N.addr, f); fclose(f); }
-	N.phase = PH_CONNECT;
+	rememberPc(N.addr);
+	N.phase = PH_CONNECT; tStart = osGetTime();
 	netDraw(); netDraw();                         // (both buffers) - the connect below can take a few seconds
 	if (!net_init()) { N.phase = PH_ERROR; strcpy(N.msg, "Couldn't start the 3DS's networking."); finish(); return false; }
 
